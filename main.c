@@ -181,6 +181,8 @@ int main(int argc, char* argv[]) {
   int jq_flags = 0;
   size_t short_opts = 0;
   jv program_arguments = jv_array();
+  jv program_file = jv_string("");
+  int from_file = 0;
   for (int i=1; i<argc; i++, short_opts = 0) {
     if (further_args_are_files) {
       input_filenames[ninput_files++] = argv[i];
@@ -235,8 +237,25 @@ int main(int argc, char* argv[]) {
         if (!short_opts) continue;
       }
       if (isoption(argv[i], 'f', "from-file", &short_opts)) {
-        options |= FROM_FILE;
-        if (!short_opts) continue;
+        if (i >= argc - 1) {
+          fprintf(stderr, "%s: --from-file takes a parameter\n", progname);
+          die();
+        }
+        jv progdata = jv_load_file(argv[i+1],1);
+        if (!jv_is_valid(progdata)) {
+          progdata = jv_invalid_get_msg(progdata);
+          fprintf(stderr, "%s: Error loading file %s.  %s\n", progname, 
+                  argv[i+1], jv_string_value(progdata));
+          jv_free(progdata);
+          ret = 2;
+          goto out;
+        }
+        program_file = jv_string_concat(jv_string_concat(program_file, jv_string("\n")), progdata);
+		  from_file = 1;
+        if (!short_opts) {
+			  i += 1;
+			  continue;
+		  }
       }
       if (isoption(argv[i], 'j', "join-output", &short_opts)) {
         options |= RAW_OUTPUT | RAW_NO_LF;
@@ -257,6 +276,7 @@ int main(int argc, char* argv[]) {
         program_arguments = jv_array_append(program_arguments, arg);
         i += 2; // skip the next two arguments
         if (!short_opts) continue;
+
       }
       if (isoption(argv[i], 0, "argfile", &short_opts)) {
         if (i >= argc - 2) {
@@ -303,6 +323,8 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "%s: Unknown option %s\n", progname, argv[i]);
         die();
       }
+		i += from_file;
+		from_file = 0;
     }
   }
 
@@ -317,7 +339,7 @@ int main(int argc, char* argv[]) {
     program = ".";
 #endif
 
-  if (!program) usage(2);
+  if (!program && !jv_string_length_codepoints(program_file)) usage(2);
   if (ninput_files == 0) current_input = stdin;
 
   if ((options & PROVIDE_NULL) && (options & (RAW_INPUT | SLURP))) {
@@ -325,20 +347,13 @@ int main(int argc, char* argv[]) {
     die();
   }
   
-  if (options & FROM_FILE) {
-    jv data = jv_load_file(program, 1);
-    if (!jv_is_valid(data)) {
-      data = jv_invalid_get_msg(data);
-      fprintf(stderr, "%s: %s\n", progname, jv_string_value(data));
-      jv_free(data);
-      ret = 2;
-      goto out;
-    }
-    compiled = jq_compile_args(jq, jv_string_value(data), program_arguments);
-    jv_free(data);
-  } else {
-    compiled = jq_compile_args(jq, program, program_arguments);
+
+  if (program) {
+    program_file = jv_string_concat(jv_string_concat(program_file,jv_string("\n")), jv_string(program));
   }
+
+  compiled = jq_compile_args(jq, jv_string_value(program_file), program_arguments);
+  jv_free(program_file);
   if (!compiled){
     ret = 3;
     goto out;
