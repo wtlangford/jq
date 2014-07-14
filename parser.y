@@ -217,7 +217,7 @@ FuncDefs:
   $$ = gen_noop();
 } |
 FuncDef FuncDefs {
-  $$ = block_join($1, $2);
+  $$ = block_bind($1, $2, OP_IS_CALL_PSEUDO);
 }
 
 Exp:
@@ -240,6 +240,11 @@ Term "as" '$' IDENT '|' Exp {
 
 "foreach" Term "as" '$' IDENT '(' Exp ';' Exp ';' Exp ')' {
   $$ = gen_foreach(jv_string_value($5), $2, $7, $9, $11);
+  jv_free($5);
+} |
+
+"foreach" Term "as" '$' IDENT '(' Exp ';' Exp ')' {
+  $$ = gen_foreach(jv_string_value($5), $2, $7, $9, gen_noop());
   jv_free($5);
 } |
 
