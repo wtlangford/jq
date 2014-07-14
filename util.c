@@ -61,3 +61,31 @@ jv get_home() {
   return ret;
 }
 
+#ifndef HAVE_MEMMEM
+#ifdef memmem
+#undef memmem
+#endif
+#define memmem my_memmem
+const void *memmem(const void *haystack, size_t haystacklen,
+                   const void *needle, size_t needlelen) {
+  const char *h = haystack;
+  const char *n = needle;
+  size_t hi, hi2, ni;
+
+  if (haystacklen < needlelen || haystacklen == 0)
+    return NULL;
+  for (hi = 0; hi < (haystacklen - needlelen + 1); hi++) {
+    for (ni = 0, hi2 = hi; ni < needlelen; ni++, hi2++) {
+      if (h[hi2] != n[ni])
+        goto not_this;
+    }
+
+    return &h[hi];
+
+not_this:
+    continue;
+  }
+  return NULL;
+}
+#endif /* HAVE_MEMMEM */
+
