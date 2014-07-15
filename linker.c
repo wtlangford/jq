@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <limits.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +53,7 @@ jv build_lib_search_chain(jq_state *jq, jv lib_path) {
 }
 
 static jv find_lib(jq_state *jq, jv lib_name, jv lib_search_path) {
+  static char tmp_path[PATH_MAX];
 	assert(jv_get_kind(lib_search_path) == JV_KIND_STRING);
 	assert(jv_get_kind(lib_name) == JV_KIND_STRING);
 
@@ -63,7 +65,13 @@ static jv find_lib(jq_state *jq, jv lib_name, jv lib_search_path) {
 	jv lib_search_paths = build_lib_search_chain(jq, lib_search_path);
 
 	jv_array_foreach(lib_search_paths, i, spath) {
-		jv testpath = jv_string_fmt("%s/%s.jq",jv_string_value(spath),jv_string_value(lib_name));
+    jv testpath;
+		testpath = jv_string_fmt("%s/%s.jq",jv_string_value(spath),jv_string_value(lib_name));
+    if (realpath(jv_string_value(testpath),tmp_path)) {
+      jv_free(testpath);
+      testpath = jv_string(tmp_path);
+    }
+    
 		printf("Searching for %s\n", jv_string_value(testpath));
 		jv_free(spath);
 		ret = stat(jv_string_value(testpath),&st);
@@ -96,8 +104,8 @@ static int process_dependencies(jq_state *jq, jv lib_origin, block *src_block, s
 			jv_free(search);
 			search = jv_string("");
 		}
-    if (strncmp("$ORIGIN",jv_string_value(search),7) == 0) {
-			jv tsearch = jv_string_fmt("%s/%s",jv_string_value(lib_origin),jv_string_value(search)+7);
+    if (strncmp("$ORIGIN/",jv_string_value(search),8) == 0) {
+			jv tsearch = jv_string_fmt("%s/%s",jv_string_value(lib_origin),jv_string_value(search)+8);
       jv_free(search);
       search = tsearch;
 		}
@@ -170,12 +178,14 @@ int load_program(jq_state *jq, struct locfile* src, block *out_block) {
 	}
 	block libs = gen_noop();
 	for (uint64_t i = 0; i < lib_state.ct; ++i) {
+    printf("%s\n",lib_state.names[i]);
 		free(lib_state.names[i]);
 		libs = block_join(libs, lib_state.defs[i]);
 	}
 	free(lib_state.names);
 	free(lib_state.defs);
-	*out_block = block_join(libs, program);
+  //*out_block = block_join(libs,program);
+	*out_block = block_drop_unreferenced(block_join(libs, program));
 
 	return nerrors;
 }

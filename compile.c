@@ -351,6 +351,7 @@ block block_bind_referenced(block binder, block body, int bindflags) {
       // Check if this binder is referenced from any of the ones we
       // already know are referenced by body.
       nrefs += block_count_refs(b, refd);
+      nrefs += block_count_refs(b, body);
       if (nrefs) {
         refd = BLOCK(refd, b);
         kept++;
@@ -366,6 +367,38 @@ block block_bind_referenced(block binder, block body, int bindflags) {
   }
   block_free(unrefd);
   return block_join(refd, body);
+}
+
+block block_drop_unreferenced(block body) {
+  inst* curr;
+  block refd = gen_noop();
+  block unrefd = gen_noop();
+  int drop;
+  printf("drop\n");
+  do {
+    drop = 0;
+    while((curr = block_take(&body)) && curr->op != TOP) {
+      printf("%s ",curr->symbol);
+      block b = inst_block(curr);
+      if (block_count_refs(b,refd) + block_count_refs(b,body) == 0) {
+        printf("u\n");
+        unrefd = BLOCK(unrefd, b);
+        drop++;
+      } else {
+        printf("r\n");
+        refd = BLOCK(refd, b);
+      }
+    }
+    if (curr && curr->op == TOP) {
+      body = BLOCK(inst_block(curr),body);
+    }
+    printf("--\n");
+    body = BLOCK(refd, body);
+    refd = gen_noop();
+  } while (drop != 0);
+  printf("done\n");
+  block_free(unrefd);
+  return body;
 }
 
 jv block_take_imports(block* body) {
