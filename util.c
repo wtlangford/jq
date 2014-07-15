@@ -9,9 +9,7 @@
 #include "util.h"
 #include "jv.h"
 
-// This isn't -technically- canonicalization, since I don't
-// think it's necessary.  But that's the best name I had.
-jv canonicalize_path(jv path) {
+jv expand_path(jv path) {
   assert(jv_get_kind(path) == JV_KIND_STRING);
   const char *pstr = jv_string_value(path);
   jv ret = path;

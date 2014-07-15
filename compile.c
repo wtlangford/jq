@@ -8,6 +8,7 @@
 #include "bytecode.h"
 #include "locfile.h"
 #include "jv_alloc.h"
+#include "linker.h"
 
 /*
   The intermediate representation for jq filters is as a sequence of
@@ -205,6 +206,16 @@ block block_join(block a, block b) {
   return c;
 }
 
+int block_has_only_binders_and_imports(block binders, int bindflags) {
+  bindflags |= OP_HAS_BINDING;
+  for (inst* curr = binders.first; curr; curr = curr->next) {
+    if ((opcode_describe(curr->op)->flags & bindflags) != bindflags && curr->op != DEPS) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 int block_has_only_binders(block binders, int bindflags) {
   bindflags |= OP_HAS_BINDING;
   for (inst* curr = binders.first; curr; curr = curr->next) {
@@ -303,6 +314,28 @@ block block_bind(block binder, block body, int bindflags) {
   return block_join(binder, body);
 }
 
+block block_bind_library(block binder, block body, int bindflags, const char* libname) {
+  assert(block_has_only_binders(binder, bindflags));
+  bindflags |= OP_HAS_BINDING;
+  int nrefs = 0;
+  int matchlen = strlen(libname)+2;
+  char* matchname = malloc(matchlen+1);
+  strcpy(matchname,libname);
+  strcpy(matchname+matchlen-2,"::");
+  for (inst *curr = binder.first; curr; curr = curr->next) {
+    char* cname = curr->symbol;
+    char* tname = malloc(strlen(curr->symbol)+matchlen+1);
+    strcpy(tname, matchname);
+    strcpy(tname+matchlen,cname);
+    curr->symbol = tname;
+    nrefs += block_bind_subblock(inst_block(curr), body, bindflags);
+    curr->symbol = cname;
+    free(tname);
+  }
+  free(matchname);
+  return body; // We don't return a join because we don't want those sticking around...
+}
+
 // Bind binder to body and throw away any defs in binder not referenced
 // (directly or indirectly) from body.
 block block_bind_referenced(block binder, block body, int bindflags) {
@@ -333,6 +366,38 @@ block block_bind_referenced(block binder, block body, int bindflags) {
   }
   block_free(unrefd);
   return block_join(refd, body);
+}
+
+jv block_take_imports(block* body) {
+  jv imports = jv_array();
+  
+  inst* top = NULL;
+  if (body->first->op == TOP) {
+    top = block_take(body);
+  }
+  while (body->first && body->first->op == DEPS) {
+    inst* dep = block_take(body);
+    jv opts = jv_copy(dep->imm.constant);
+    opts = jv_object_set(opts,jv_string("name"),jv_string(dep->symbol));
+    imports = jv_array_append(imports, opts);
+    inst_free(dep);
+  }
+  if (top) {
+    *body = block_join(inst_block(top),*body);
+  }
+  return imports;
+}
+
+block gen_import(const char* name, const char* as, const char* search) {
+  inst* i = inst_new(DEPS);
+  i->symbol = strdup(name);
+  jv opts = jv_object();
+  if (as)
+	  opts = jv_object_set(opts, jv_string("as"), jv_string(as));
+  if (search)
+	  opts = jv_object_set(opts, jv_string("search"), jv_string(search));
+  i->imm.constant = opts;
+  return inst_block(i);
 }
 
 block gen_function(const char* name, block formals, block body) {

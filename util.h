@@ -3,7 +3,7 @@
 
 #include "jv.h"
 
-jv canonicalize_path(jv);
+jv expand_path(jv);
 jv get_home(void);
 
 #ifndef HAVE_MEMMEM

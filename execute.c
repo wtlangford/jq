@@ -17,6 +17,7 @@
 #include "parser.h"
 #include "builtin.h"
 #include "util.h"
+#include "linker.h"
 
 struct jq_state {
   void (*nomem_handler)(void *);
@@ -36,6 +37,8 @@ struct jq_state {
   int subexp_nest;
   int debug_trace_enabled;
   int initial_execution;
+
+  jv attrs;
 };
 
 struct closure {
@@ -772,6 +775,7 @@ jq_state *jq_init(void) {
   jq->err_cb = NULL;
   jq->err_cb_data = NULL;
 
+  jq->attrs = jv_object();
   jq->path = jv_null();
   return jq;
 }
@@ -821,6 +825,7 @@ void jq_teardown(jq_state **jq) {
   jq_reset(old_jq);
   bytecode_free(old_jq->bc);
   old_jq->bc = 0;
+  jv_free(old_jq->attrs);
 
   jv_mem_free(old_jq);
 }
@@ -896,66 +901,6 @@ static struct bytecode *optimize(struct bytecode *bc) {
 }
 
 
-static jv build_lib_search_chain(jv lib_paths) {
-  assert(jv_get_kind(lib_paths) == JV_KIND_ARRAY);
-  char *penv = getenv("JQ_LIBRARY_PATH");
-  if (!penv) penv = "";
-
-  lib_paths = jv_array_concat(lib_paths, jv_string_split(jv_string(penv),jv_string(":")));
-  jv out_paths = jv_array();
-  jv_array_foreach(lib_paths, i, path) {
-    if (jv_string_length_bytes(jv_copy(path)) == 0)  {
-      jv_free(path);
-      continue;
-    }
-    path = canonicalize_path(path);
-    if (jv_is_valid(path)) {
-      out_paths = jv_array_append(out_paths, path);
-    } else {
-      jv emsg = jv_invalid_get_msg(path);
-      fprintf(stderr, "%s - skipping\n", jv_string_value(emsg));
-      jv_free(emsg);
-    } 
-  }
-  jv_free(lib_paths);
-  return out_paths;
-}
-
-static jv find_lib(jv lib_search_paths, jv lib_name) {
-  assert(jv_get_kind(lib_search_paths) == JV_KIND_ARRAY);
-  assert(jv_get_kind(lib_name) == JV_KIND_STRING);
-
-  // Check for explicit paths
-  // Since all of the methods of specifying an explicit path contain a '/',
-  // ("~/some/path", "/some/path", "some/path", "./some/path"), it suffices
-  // to simply check for the existence of '/', especially since it must not
-  // exist in filenames.
-  const char *path = jv_string_value(lib_name);
-  for (const char* p2 = path; *p2; p2++) {
-    if (*p2 == '/')
-      return canonicalize_path(lib_name);
-  }
-
-  struct stat st;
-  int ret;
-
-  jv lib_filename = jv_string_fmt("/%s.jq",jv_string_value(lib_name));
-  jv_array_foreach(lib_search_paths, i, spath) {
-    jv testpath = jv_string_fmt("%s/%s",jv_string_value(spath),jv_string_value(lib_filename));
-    jv_free(spath);
-    ret = stat(jv_string_value(testpath),&st);
-    if (ret == 0) {
-      jv_free(lib_filename);
-      jv_free(lib_name);
-      return testpath;
-    }
-    jv_free(testpath);
-  }
-  jv output = jv_invalid_with_msg(jv_string_fmt("Could not find library: %s", path));
-  jv_free(lib_filename);
-  jv_free(lib_name);
-  return output;
-}
 
 static jv compile_bind_lib(jq_state *jq, block* bb, const char* lib) {
   int nerrors = 0;
@@ -980,10 +925,8 @@ static jv compile_bind_lib(jq_state *jq, block* bb, const char* lib) {
   return jv_true(); // Don't actually care.  The point is this is not invalid and doesn't malloc.
 }
 
-int jq_compile_libs_args(jq_state *jq, const char* str, jv lib_paths, jv libs, jv args) {
+int jq_compile_args(jq_state *jq, const char* str, jv args) {
   jv_nomem_handler(jq->nomem_handler, jq->nomem_handler_data);
-  assert(jv_get_kind(lib_paths) == JV_KIND_ARRAY);
-  assert(jv_get_kind(libs) == JV_KIND_ARRAY);
   assert(jv_get_kind(args) == JV_KIND_ARRAY);
   struct locfile locations;
   locfile_init(&locations, jq, str, strlen(str));
@@ -993,35 +936,13 @@ int jq_compile_libs_args(jq_state *jq, const char* str, jv lib_paths, jv libs, j
     bytecode_free(jq->bc);
     jq->bc = 0;
   }
-  int nerrors = jq_parse(&locations, &program);
+  int nerrors = load_program(jq, &locations, &program);
   if (nerrors == 0) {
     jv_array_foreach(args, i, arg) {
       jv name = jv_object_get(jv_copy(arg), jv_string("name"));
       jv value = jv_object_get(arg, jv_string("value"));
       program = gen_var_binding(gen_const(value), jv_string_value(name), program);
       jv_free(name);
-    }
-
-    lib_paths = build_lib_search_chain(lib_paths);
-
-    jv_array_foreach(libs, i, lib) {
-      jv libpath = find_lib(lib_paths, lib);
-      if (!jv_is_valid(libpath)) {
-        jv emsg = jv_invalid_get_msg(libpath);
-        fprintf(stderr, "%s\n",jv_string_value(emsg));
-        jv_free(emsg);
-        block_free(program);
-        goto compile_end; // Enjoy your raptors.
-      }
-      jv ret = compile_bind_lib(jq, &program, jv_string_value(libpath));
-      jv_free(libpath);
-      if (!jv_is_valid(ret)) {
-        jv emsg = jv_invalid_get_msg(ret);
-        fprintf(stderr, "%s\n",jv_string_value(emsg));
-        jv_free(emsg);
-        block_free(program);
-        goto compile_end;
-      }
     }
 
     nerrors = builtins_bind(jq, &program);
@@ -1042,22 +963,48 @@ int jq_compile_libs_args(jq_state *jq, const char* str, jv lib_paths, jv libs, j
   }
   if (jq->bc)
     jq->bc = optimize(jq->bc);
-compile_end: // Avoid duplication of free() code, because that's where leaks come from.
-  jv_free(lib_paths);
-  jv_free(libs);
   jv_free(args);
   locfile_free(&locations);
   return jq->bc != NULL;
 }
 
-int jq_compile_args(jq_state *jq, const char* str, jv args) {
-  return jq_compile_libs_args(jq, str, jv_array(), jv_array(), args);
-}
 
 int jq_compile(jq_state *jq, const char* str) {
-  return jq_compile_libs_args(jq, str, jv_array(), jv_array(), jv_array());
+  return jq_compile_args(jq, str, jv_array());
 }
 
+void jq_set_lib_origin(jq_state *jq, jv origin) {
+	assert(jq);
+	assert(jv_get_kind(origin) == JV_KIND_STRING);
+	jq_set_attr(jq, jv_string("ORIGIN"), origin);
+}
+jv jq_get_lib_origin(jq_state *jq) {
+	assert(jq);
+	return jq_get_attr(jq, jv_string("ORIGIN"));
+}
+
+void jq_set_lib_dirs(jq_state *jq, jv dirs) {
+	assert(jq);
+	assert(jv_get_kind(dirs) == JV_KIND_ARRAY);
+	jq_set_attr(jq, jv_string("LIB_DIRS"), dirs);
+}
+jv jq_get_lib_dirs(jq_state *jq) {
+	assert(jq);
+	return jq_get_attr(jq, jv_string("LIB_DIRS"));
+}
+
+void jq_set_attr(jq_state *jq, jv attr, jv val) {
+	assert(jq);
+	assert(jv_get_kind(attr) == JV_KIND_STRING);
+	assert(jv_is_valid(val));
+	jq->attrs = jv_object_set(jq->attrs, attr, val);
+}
+
+jv jq_get_attr(jq_state *jq, jv attr) {
+	assert(jq);
+	assert(jv_get_kind(attr) == JV_KIND_STRING);
+	return jv_object_get(jv_copy(jq->attrs), attr);
+}
 void jq_dump_disassembly(jq_state *jq, int indent) {
   dump_disassembly(indent, jq->bc);
 }

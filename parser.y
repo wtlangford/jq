@@ -57,7 +57,9 @@ struct lexer_param;
 %token NEQ "!="
 %token DEFINEDOR "//"
 %token AS "as"
+%token SEARCH "search"
 %token DEF "def"
+%token IMPORT "import"
 %token IF "if"
 %token THEN "then"
 %token ELSE "else"
@@ -97,7 +99,7 @@ struct lexer_param;
 %left '*' '/' '%'
 
 
-%type <blk> Exp Term MkDict MkDictPair ExpD ElseBody QQString FuncDef FuncDefs String
+%type <blk> Exp Term MkDict MkDictPair ExpD ElseBody QQString FuncDef FuncDefs String Import Imports
 %{
 #include "lexer.h"
 struct lexer_param {
@@ -205,12 +207,20 @@ static block gen_update(block object, block val, int optype) {
 
 %%
 TopLevel:
-Exp {
-  *answer = BLOCK(gen_op_simple(TOP), $1);
+Imports Exp {
+  *answer = BLOCK($1, gen_op_simple(TOP), $2);
 } |
-FuncDefs {
-  *answer = $1;
+Imports FuncDefs {
+  *answer = BLOCK($1, $2);
 } 
+
+Imports:
+/* empty */ {
+  $$ = gen_noop();
+} |
+Import Imports {
+  $$ = BLOCK($1, $2);
+}
 
 FuncDefs:
 /* empty */ {
@@ -376,6 +386,28 @@ Exp ">=" Exp {
 
 Term { 
   $$ = $1; 
+}
+
+Import:
+"import" IDENT ';' {
+  $$ = gen_import(jv_string_value($2), NULL, NULL);
+  jv_free($2);
+} |
+"import" IDENT "as" IDENT ';' {
+  $$ = gen_import(jv_string_value($2), jv_string_value($4), NULL);
+  jv_free($2);
+  jv_free($4);
+} |
+"import" IDENT "as" IDENT "search" QQSTRING_START QQSTRING_TEXT QQSTRING_END ';' {
+  $$ = gen_import(jv_string_value($2), jv_string_value($4), jv_string_value($7));
+  jv_free($2);
+  jv_free($4);
+  jv_free($7);
+} |
+"import" IDENT "search" QQSTRING_START QQSTRING_TEXT QQSTRING_END ';' {
+  $$ = gen_import(jv_string_value($2), NULL, jv_string_value($5));
+  jv_free($2);
+  jv_free($5);
 }
 
 FuncDef:
@@ -694,6 +726,6 @@ int jq_parse_library(struct locfile* locations, block* answer) {
     locfile_locate(locations, UNKNOWN_LOCATION, "error: library should only have function definitions, not a main expression");
     return 1;
   }
-  assert(block_has_only_binders(*answer, OP_IS_CALL_PSEUDO));
+  assert(block_has_only_binders_and_imports(*answer, OP_IS_CALL_PSEUDO));
   return 0;
 }

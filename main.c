@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <errno.h>
+#include <libgen.h>
 #include <string.h>
 #include <ctype.h>
 #include <unistd.h>
@@ -192,7 +193,6 @@ int main(int argc, char* argv[]) {
   int jq_flags = 0;
   size_t short_opts = 0;
   jv program_arguments = jv_array();
-  jv required_libs = jv_array();
   jv lib_search_paths = jv_array();
   for (int i=1; i<argc; i++, short_opts = 0) {
     if (further_args_are_files) {
@@ -207,20 +207,8 @@ int main(int argc, char* argv[]) {
         program = argv[i];
       }
     } else {
-      if (argv[i][1] == 'l') {
-        if (strlen(argv[i]) > 2) { // -lname
-          required_libs = jv_array_append(required_libs, jv_string(argv[i]+2));
-        } else if (i >= argc - 1) {
-          fprintf(stderr, "-l takes a parameter: (e.g. -l name or -lname)\n");
-          die();
-        } else {
-          required_libs = jv_array_append(required_libs, jv_string(argv[i+1]));
-          i++;
-        }
-        continue;
-      }
       if (argv[i][1] == 'L') {
-        if (argv[i][2] != 0) { // -lname (faster check than strlen)
+        if (argv[i][2] != 0) { // -Lname (faster check than strlen)
             lib_search_paths = jv_array_append(lib_search_paths, jv_string(argv[i]+2));
         } else if (i >= argc - 1) {
           fprintf(stderr, "-L takes a parameter: (e.g. -L /search/path or -L/search/path)\n");
@@ -345,6 +333,22 @@ int main(int argc, char* argv[]) {
     }
   }
 
+	char *penv = getenv("JQ_LIBRARY_PATH");
+	if (penv) {
+#ifdef WIN32
+#define PATH_ENV_SEPARATOR ";"
+#else
+#define PATH_ENV_SEPARATOR ":"
+#endif
+		lib_search_paths = jv_array_concat(lib_search_paths,jv_string_split(jv_string(penv),jv_string(PATH_ENV_SEPARATOR)));
+#undef PATH_ENV_SEPARATOR
+	}
+	jq_set_lib_dirs(jq,lib_search_paths);
+  penv = strdup(argv[0]);
+
+  jq_set_lib_origin(jq,jv_string(dirname(penv)));
+  free(penv);
+
 #if (!defined(WIN32) && defined(HAVE_ISATTY)) || defined(HAVE__ISATTY)
 
 #if defined(HAVE__ISATTY) && defined(isatty)
@@ -373,12 +377,10 @@ int main(int argc, char* argv[]) {
       ret = 2;
       goto out;
     }
-    compiled = jq_compile_libs_args(jq, jv_string_value(data), lib_search_paths,
-                                    required_libs, program_arguments);
+    compiled = jq_compile_args(jq, jv_string_value(data), program_arguments);
     jv_free(data);
   } else {
-    compiled = jq_compile_libs_args(jq, program, lib_search_paths, 
-                                    required_libs, program_arguments);
+    compiled = jq_compile_args(jq, program, program_arguments);
   }
   if (!compiled){
     ret = 3;
