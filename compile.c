@@ -35,6 +35,7 @@ struct inst {
     const struct cfunction* cfunc;
   } imm;
 
+  struct locfile* locfile;
   location source;
 
   // Binding
@@ -75,6 +76,7 @@ static inst* inst_new(opcode op) {
   i->subfn = gen_noop();
   i->arglist = gen_noop();
   i->source = UNKNOWN_LOCATION;
+  i->locfile = 0;
   return i;
 }
 
@@ -82,6 +84,8 @@ static void inst_free(struct inst* i) {
   jv_mem_free(i->symbol);
   block_free(i->subfn);
   block_free(i->arglist);
+  if (i->locfile)
+    locfile_free(i->locfile);
   if (opcode_describe(i->op)->flags & OP_HAS_CONSTANT) {
     jv_free(i->imm.constant);
   }
@@ -111,11 +115,12 @@ static inst* block_take(block* b) {
   return i;
 }
 
-block gen_location(location loc, block b) {
+block gen_location(location loc, struct locfile* l, block b) {
   for (inst* i = b.first; i; i = i->next) {
     if (i->source.start == UNKNOWN_LOCATION.start &&
         i->source.end == UNKNOWN_LOCATION.end) {
       i->source = loc;
+      i->locfile = locfile_retain(l);
     }
   }
   return b;
@@ -675,13 +680,13 @@ static int count_cfunctions(block b) {
 
 
 // Expands call instructions into a calling sequence
-static int expand_call_arglist(struct locfile* locations, block* b) {
+static int expand_call_arglist(block* b) {
   int errors = 0;
   block ret = gen_noop();
   for (inst* curr; (curr = block_take(b));) {
     if (opcode_describe(curr->op)->flags & OP_HAS_BINDING) {
       if (!curr->bound_by) {
-        locfile_locate(locations, curr->source, "error: %s/%d is not defined", curr->symbol, block_count_actuals(curr->arglist));
+        locfile_locate(curr->locfile, curr->source, "error: %s/%d is not defined", curr->symbol, block_count_actuals(curr->arglist));
         errors++;
         // don't process this instruction if it's not well-defined
         ret = BLOCK(ret, inst_block(curr));
@@ -732,7 +737,7 @@ static int expand_call_arglist(struct locfile* locations, block* b) {
           i->subfn = gen_noop();
           inst_free(i);
           // arguments should be pushed in reverse order, prepend them to prelude
-          errors += expand_call_arglist(locations, &body);
+          errors += expand_call_arglist(&body);
           prelude = BLOCK(gen_subexp(body), prelude);
           actual_args++;
         }
@@ -754,12 +759,12 @@ static int expand_call_arglist(struct locfile* locations, block* b) {
   return errors;
 }
 
-static int compile(struct locfile* locations, struct bytecode* bc, block b) {
+static int compile(struct bytecode* bc, block b) {
   int errors = 0;
   int pos = 0;
   int var_frame_idx = 0;
   bc->nsubfunctions = 0;
-  errors += expand_call_arglist(locations, &b);
+  errors += expand_call_arglist(&b);
   b = BLOCK(b, gen_op_simple(RET));
   jv localnames = jv_array();
   for (inst* curr = b.first; curr; curr = curr->next) {
@@ -815,7 +820,7 @@ static int compile(struct locfile* locations, struct bytecode* bc, block b) {
           params = jv_array_append(params, jv_string(param->symbol));
         }
         subfn->debuginfo = jv_object_set(subfn->debuginfo, jv_string("params"), params);
-        errors += compile(locations, subfn, curr->subfn);
+        errors += compile(subfn, curr->subfn);
         curr->subfn = gen_noop();
       }
     }
@@ -874,7 +879,7 @@ static int compile(struct locfile* locations, struct bytecode* bc, block b) {
   return errors;
 }
 
-int block_compile(block b, struct locfile* locations, struct bytecode** out) {
+int block_compile(block b, struct bytecode** out) {
   struct bytecode* bc = jv_mem_alloc(sizeof(struct bytecode));
   bc->parent = 0;
   bc->nclosures = 0;
@@ -884,7 +889,7 @@ int block_compile(block b, struct locfile* locations, struct bytecode** out) {
   bc->globals->cfunctions = jv_mem_alloc(sizeof(struct cfunction) * ncfunc);
   bc->globals->cfunc_names = jv_array();
   bc->debuginfo = jv_object_set(jv_object(), jv_string("name"), jv_null());
-  int nerrors = compile(locations, bc, b);
+  int nerrors = compile(bc, b);
   assert(bc->globals->ncfunctions == ncfunc);
   if (nerrors > 0) {
     bytecode_free(bc);

@@ -631,41 +631,41 @@ FORMAT {
   $$ = BLOCK(gen_subexp(gen_const(jv_object())), $2, gen_op_simple(POP));
 } |
 '$' IDENT {
-  $$ = gen_location(@$, gen_op_unbound(LOADV, jv_string_value($2)));
+  $$ = gen_location(@$, locations, gen_op_unbound(LOADV, jv_string_value($2)));
   jv_free($2);
 } | 
 IDENT {
-  $$ = gen_location(@$, gen_call(jv_string_value($1), gen_noop()));
+  $$ = gen_location(@$, locations, gen_call(jv_string_value($1), gen_noop()));
   jv_free($1);
 } |
 IDENT '(' Exp ')' {
   $$ = gen_call(jv_string_value($1), gen_lambda($3));
-  $$ = gen_location(@1, $$);
+  $$ = gen_location(@1, locations, $$);
   jv_free($1);
 } |
 IDENT '(' Exp ';' Exp ')' {
   $$ = gen_call(jv_string_value($1), BLOCK(gen_lambda($3), gen_lambda($5)));
-  $$ = gen_location(@1, $$);
+  $$ = gen_location(@1, locations, $$);
   jv_free($1);
 } |
 IDENT '(' Exp ';' Exp ';' Exp ')' {
   $$ = gen_call(jv_string_value($1), BLOCK(gen_lambda($3), gen_lambda($5), gen_lambda($7)));
-  $$ = gen_location(@1, $$);
+  $$ = gen_location(@1, locations, $$);
   jv_free($1);
 } |
 IDENT '(' Exp ';' Exp ';' Exp ';' Exp ')' {
   $$ = gen_call(jv_string_value($1), BLOCK(gen_lambda($3), gen_lambda($5), gen_lambda($7), gen_lambda($9)));
-  $$ = gen_location(@1, $$);
+  $$ = gen_location(@1, locations, $$);
   jv_free($1);
 } |
 IDENT '(' Exp ';' Exp ';' Exp ';' Exp ';' Exp ')' {
   $$ = gen_call(jv_string_value($1), BLOCK(gen_lambda($3), gen_lambda($5), gen_lambda($7), gen_lambda($9), gen_lambda($11)));
-  $$ = gen_location(@1, $$);
+  $$ = gen_location(@1, locations, $$);
   jv_free($1);
 } |
 IDENT '(' Exp ';' Exp ';' Exp ';' Exp ';' Exp ';' Exp ')' {
   $$ = gen_call(jv_string_value($1), BLOCK(gen_lambda($3), gen_lambda($5), gen_lambda($7), gen_lambda($9), gen_lambda($11), gen_lambda($13)));
-  $$ = gen_location(@1, $$);
+  $$ = gen_location(@1, locations, $$);
   jv_free($1);
 } |
 '(' error ')' { $$ = gen_noop(); } |

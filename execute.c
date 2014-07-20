@@ -904,17 +904,17 @@ static struct bytecode *optimize(struct bytecode *bc) {
 
 static jv compile_bind_lib(jq_state *jq, block* bb, const char* lib) {
   int nerrors = 0;
-  struct locfile src;
+  struct locfile* src;
   block funcs;
   jv data = jv_load_file(lib, 1);
   if (jv_is_valid(data)) {
-    locfile_init(&src, jq, jv_string_value(data), jv_string_length_bytes(jv_copy(data)));
-    nerrors = jq_parse_library(&src, &funcs);
+    src = locfile_init(jq, jv_string_value(data), jv_string_length_bytes(jv_copy(data)));
+    nerrors = jq_parse_library(src, &funcs);
     if (nerrors == 0) {
       *bb = block_bind_referenced(funcs, *bb, OP_IS_CALL_PSEUDO);
-      locfile_free(&src);
+      locfile_free(src);
     } else {
-      locfile_free(&src);
+      locfile_free(src);
       jv_free(data);
       return jv_invalid_with_msg(jv_string_fmt("Failed to parse lib %s.",lib));
     }
@@ -928,15 +928,15 @@ static jv compile_bind_lib(jq_state *jq, block* bb, const char* lib) {
 int jq_compile_args(jq_state *jq, const char* str, jv args) {
   jv_nomem_handler(jq->nomem_handler, jq->nomem_handler_data);
   assert(jv_get_kind(args) == JV_KIND_ARRAY);
-  struct locfile locations;
-  locfile_init(&locations, jq, str, strlen(str));
+  struct locfile* locations;
+  locations = locfile_init(jq, str, strlen(str));
   block program;
   jq_reset(jq);
   if (jq->bc) {
     bytecode_free(jq->bc);
     jq->bc = 0;
   }
-  int nerrors = load_program(jq, &locations, &program);
+  int nerrors = load_program(jq, locations, &program);
   if (nerrors == 0) {
     jv_array_foreach(args, i, arg) {
       jv name = jv_object_get(jv_copy(arg), jv_string("name"));
@@ -947,7 +947,7 @@ int jq_compile_args(jq_state *jq, const char* str, jv args) {
 
     nerrors = builtins_bind(jq, &program);
     if (nerrors == 0) {
-      nerrors = block_compile(program, &locations, &jq->bc);
+      nerrors = block_compile(program, &jq->bc);
     }
   }
   if (nerrors) {
@@ -964,7 +964,7 @@ int jq_compile_args(jq_state *jq, const char* str, jv args) {
   if (jq->bc)
     jq->bc = optimize(jq->bc);
   jv_free(args);
-  locfile_free(&locations);
+  locfile_free(locations);
   return jq->bc != NULL;
 }
 

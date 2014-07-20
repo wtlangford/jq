@@ -33,6 +33,8 @@ jv build_lib_search_chain(jq_state *jq, jv lib_path) {
   jv out_paths = jv_array();
   if (jv_string_length_bytes(jv_copy(lib_path)))
     out_paths = jv_array_append(out_paths, lib_path);
+  else
+    jv_free(lib_path);
   jv lib_dirs = jq_get_lib_dirs(jq);
   jv_array_foreach(lib_dirs, i, path) {
     if (jv_string_length_bytes(jv_copy(path)) == 0)  {
@@ -143,13 +145,13 @@ static int process_dependencies(jq_state *jq, jv lib_origin, block *src_block, s
 // into *out_block
 static int load_library(jq_state *jq, jv lib_path, block *out_block, struct lib_loading_state *lib_state) {
 	int nerrors = 0;
-	struct locfile src;
+	struct locfile* src;
 	block program;
 	jv data = jv_load_file(jv_string_value(lib_path), 1);
 	int state_idx;
 	if (jv_is_valid(data)) {
-		locfile_init(&src, jq, jv_string_value(data), jv_string_length_bytes(jv_copy(data)));
-		nerrors = jq_parse_library(&src, &program);
+		src = locfile_init(jq, jv_string_value(data), jv_string_length_bytes(jv_copy(data)));
+		nerrors = jq_parse_library(src, &program);
 		if (nerrors == 0) {
 			state_idx = lib_state->ct++;
 			lib_state->names = realloc(lib_state->names, lib_state->ct * sizeof(const char *));
@@ -161,7 +163,7 @@ static int load_library(jq_state *jq, jv lib_path, block *out_block, struct lib_
       free(lib_origin);
 			*out_block = lib_state->defs[state_idx];
 		}
-		locfile_free(&src);
+		locfile_free(src);
 	}
   jv_free(lib_path);
   jv_free(data);
