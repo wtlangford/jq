@@ -379,29 +379,23 @@ block block_drop_unreferenced(block body) {
   block refd = gen_noop();
   block unrefd = gen_noop();
   int drop;
-  printf("drop\n");
   do {
     drop = 0;
     while((curr = block_take(&body)) && curr->op != TOP) {
-      printf("%s ",curr->symbol);
       block b = inst_block(curr);
       if (block_count_refs(b,refd) + block_count_refs(b,body) == 0) {
-        printf("u\n");
         unrefd = BLOCK(unrefd, b);
         drop++;
       } else {
-        printf("r\n");
         refd = BLOCK(refd, b);
       }
     }
     if (curr && curr->op == TOP) {
       body = BLOCK(inst_block(curr),body);
     }
-    printf("--\n");
     body = BLOCK(refd, body);
     refd = gen_noop();
   } while (drop != 0);
-  printf("done\n");
   block_free(unrefd);
   return body;
 }

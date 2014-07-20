@@ -1,9 +1,13 @@
 
+#ifdef HAVE_MEMMEM
+#define _GNU_SOURCE
+#include <string.h>
+#endif
 #include <assert.h>
 #include <pwd.h>
 #include <stdlib.h>
-#include <sys/types.h>
 #include <unistd.h>
+#include <limits.h>
 
 
 #include "util.h"
@@ -59,13 +63,34 @@ jv get_home() {
   return ret;
 }
 
-#ifndef HAVE_MEMMEM
-#ifdef memmem
-#undef memmem
+
+jv jq_realpath(jv path) {
+  int path_max;
+  char *buf = NULL;
+#ifdef _PC_PATH_MAX
+  path_max = pathconf(jv_string_value(path),_PC_PATH_MAX);
+#else
+  path_max = PATH_MAX;
 #endif
-#define memmem my_memmem
-const void *memmem(const void *haystack, size_t haystacklen,
-                   const void *needle, size_t needlelen) {
+  if (path_max > 0) {
+     buf = malloc(sizeof(char) * path_max);
+  }
+  char *tmp = realpath(jv_string_value(path), buf);
+  if (tmp == NULL) {
+    free(buf);
+    return path;
+  }
+  jv_free(path);
+  path = jv_string(tmp);
+  free(tmp);
+  return path;
+}
+
+const void *jq_memmem(const void *haystack, size_t haystacklen,
+                      const void *needle, size_t needlelen) {
+#ifdef HAVE_MEMMEM
+  return (const void*)memmem(haystack, haystacklen, needle, needlelen);
+#else
   const char *h = haystack;
   const char *n = needle;
   size_t hi, hi2, ni;
@@ -84,6 +109,6 @@ not_this:
     continue;
   }
   return NULL;
+#endif /* !HAVE_MEMMEM */
 }
-#endif /* HAVE_MEMMEM */
 

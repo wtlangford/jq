@@ -5,11 +5,10 @@
 
 jv expand_path(jv);
 jv get_home(void);
+jv jq_realpath(jv);
 
-#ifndef HAVE_MEMMEM
-const void *memmem(const void *haystack, size_t haystacklen,
-                   const void *needle, size_t needlelen);
-#endif /* HAVE_MEMMEM */
+const void *jq_memmem(const void *haystack, size_t haystacklen,
+                      const void *needle, size_t needlelen);
 
 #ifndef MIN
 #define MIN(a,b) \
