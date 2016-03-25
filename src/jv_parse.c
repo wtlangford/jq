@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <math.h>
+#include <errno.h>
 #include "jv.h"
 #include "jv_dtoa.h"
 #include "jv_unicode.h"
@@ -487,7 +489,16 @@ static pfunc check_literal(struct jv_parser* p) {
     // FIXME: better parser
     p->tokenbuf[p->tokenpos] = 0;
     char* end = 0;
+    int old_errno = errno;
     double d = jvp_strtod(&p->dtoa, p->tokenbuf, &end);
+    if (errno == ERANGE) {
+      if (isinf(d)) {
+        fprintf(stderr,"Number overflowed to %cinf at line %d, column %d\n", d > 0 ? '+' : '-', p->line, p->column);
+      } else {
+        fprintf(stderr,"Number underflowed at line %d, column %d\n", p->line, p->column);
+      }
+    }
+    errno = old_errno;
     if (end == 0 || *end != 0)
       return "Invalid numeric literal";
     TRY(value(p, jv_number(d)));
