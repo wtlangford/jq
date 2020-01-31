@@ -1234,11 +1234,11 @@ jv jq_next(jq_state *jq) {
         } else {
           // backward compatible way of saying "i want more input"
           jv_free(start_input);
-          stack_save(jq, jq->start_pc, stack_get_pos(jq));
+          stack_save(jq, pc - 1, stack_get_pos(jq));
           return jv_invalid();
         }
       } else {
-        stack_save(jq, jq->start_pc, stack_get_pos(jq));
+        stack_save(jq, pc - 1, stack_get_pos(jq));
         stack_push(jq, start_input);
       }
       break;
