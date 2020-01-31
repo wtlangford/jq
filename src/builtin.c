@@ -1978,7 +1978,7 @@ static block gen_builtin_list(block builtins, block inlines) {
   return BLOCK(builtins, gen_function("builtins", gen_noop(), gen_const(list)));
 }
 
-extern void block_inline(block inlines, block body);
+extern block block_inline(block inlines, block body);
 
 int builtins_bind(jq_state *jq, block* bb) {
   block builtins, in_priv, in_pub;
@@ -1995,17 +1995,17 @@ int builtins_bind(jq_state *jq, block* bb) {
   builtins = gen_builtin_list(builtins, in_pub);
 
   // private inlines are just for usage inside builtins
-  block_inline(in_priv, builtins);
+  builtins = block_inline(in_priv, builtins);
 
   // inline the publics before binding the user code, which may have
   // its own definitions of the same functions (not our problem)
   // here we make sure that at least our own builtins use the correc inlines
-  block_inline(in_pub, builtins);
+  builtins = block_inline(in_pub, builtins);
 
   *bb = block_bind_referenced(builtins, *bb, OP_IS_CALL_PSEUDO);
 
   // now inline whatever publics are still unbound and matching in the user code
-  block_inline(in_pub, *bb);
+  *bb = block_inline(in_pub, *bb);
 
   block_free(in_pub);
   block_free(in_priv);

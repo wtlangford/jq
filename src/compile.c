@@ -101,15 +101,20 @@ static inst* inst_new(opcode op) {
   return i;
 }
 
-static void inst_free(struct inst* i) {
-  jv_mem_free(i->symbol);
-  block_free(i->subfn);
-  block_free(i->arglist);
-  if (i->locfile)
-    locfile_free(i->locfile);
-  if (opcode_describe(i->op)->flags & OP_HAS_CONSTANT) {
-    jv_free(i->imm.constant);
+static void inst_dispose(struct inst* i) {
+  jv_mem_free(i->symbol); i->symbol = 0;
+  block_free(i->subfn); i->subfn = gen_noop();
+  block_free(i->arglist); i->arglist = gen_noop();
+  if (i->locfile) {
+    locfile_free(i->locfile); i->locfile = 0;
   }
+  if (opcode_describe(i->op)->flags & OP_HAS_CONSTANT) {
+    jv_free(i->imm.constant); i->imm.constant = jv_invalid();
+  }
+}
+
+static void inst_free(struct inst* i) {
+  inst_dispose(i);
   jv_mem_free(i);
 }
 
@@ -498,10 +503,11 @@ static inst* block_take_last(block* b) {
   return i;
 }
 
-void block_inline(block inlines, block body) {
+block block_inline(block inlines, block body) {
 
   inst *i;
   inst *b;
+  block result = body;
 
   for (i = inlines.first; i && body.first; i = i->next) {
     for (b = body.first; b; b = b->next) {
@@ -512,6 +518,8 @@ void block_inline(block inlines, block body) {
 
             // save the call's arglist for the mapping below
             block call_arglist = b->arglist;
+            // avoid freeing the arglist in the dispose call below
+            b->arglist = gen_noop();
             // save the prev and next
             inst* prev = b->prev;
             inst* next = b->next;
@@ -531,6 +539,7 @@ void block_inline(block inlines, block body) {
             // had this call as the branch target.
             // searching for such instruction would mean 
             // that we needed to scan full code (every time) and we don't want it
+            inst_dispose(b);
             inst_copy_to(b, i->subfn.last, ctx);
             b->prev = 0; // for a valid inst block
             block_append(&copy, inst_block(b));
@@ -581,6 +590,10 @@ void block_inline(block inlines, block body) {
 
             if(prev) {
               prev->next = copy.first;
+            } else {
+              // this used to be the first instruction in body
+              // we have to update the result.first pointer now
+              result.first = copy.first;
             }
 
             // we've reused the call instruction as the last one
@@ -589,11 +602,12 @@ void block_inline(block inlines, block body) {
             // we've reused the call instruction
             // so no need to free anything
       } else {
-        block_inline(inlines, b->arglist);
-        block_inline(inlines, b->subfn);
+        b->arglist = block_inline(inlines, b->arglist);
+        b->subfn = block_inline(inlines, b->subfn);
       }
     }
   }
+  return result;
 }
 
 // Binds a sequence of binders, which *must not* alrady be bound to each other,
