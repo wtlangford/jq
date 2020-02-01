@@ -85,6 +85,7 @@ struct jq_state {
    * instead of storing it on the stack
    */
   jv start_input;
+  jq_input_mode input_mode;
 
   /*
    * I/O and co-routine handles (futures).
@@ -1224,25 +1225,41 @@ jv jq_next(jq_state *jq) {
       jv start_input = jq->start_input;
       jq->start_input = jv_invalid();
 
-      if(!jv_is_valid(start_input)) {
-        if(jq->parent) {
+      if (!jv_is_valid(start_input)) {
+        if (jv_invalid_has_msg(jv_copy(start_input))) {
+          // in case start input is an invalid with message
+          // then return this invalid and halt
           jq->halted = 1;
-          if (jv_invalid_has_msg(jv_copy(start_input))) {
-            return start_input;
-          } else {
-            jv_free(start_input);
-            return jv_invalid();
-          }
-        } else {
-          // backward compatible way of saying "i want more input"
-          jv_free(start_input);
-          stack_save(jq, pc - 1, stack_get_pos(jq));
-          return jv_invalid();
+          return start_input;
         }
-      } else {
-        stack_save(jq, pc - 1, stack_get_pos(jq));
-        stack_push(jq, start_input);
+        switch (jq->input_mode) {
+          case JQ_INPUT_RETURN_EMPTY: {
+            // the usual mode:
+            // save the stack and request more input by returning empty
+            stack_save(jq, pc - 1, stack_get_pos(jq));
+            return start_input /*jv_invalid()*/;
+          }
+          case JQ_INPUT_CALLBACK: {
+            while(!jv_is_valid(start_input) && !jv_invalid_has_msg(jv_copy(start_input))) {
+              if (jq->input_cb == NULL) {
+                return jv_invalid_with_msg(jv_string("Input callback mode requested but input callback hasn't been set"));
+              }
+
+              start_input = jq->input_cb(jq, jq->input_cb_data);
+            }
+
+            if(!jv_is_valid(start_input) && jv_invalid_has_msg(jv_copy(start_input))) {
+              jq->halted = 1;
+              return start_input;
+            }
+          }
+        }
       }
+      
+      // geting here means that start_input is a valid value
+      stack_save(jq, pc - 1, stack_get_pos(jq));
+      stack_push(jq, start_input);
+
       break;
     }
 
@@ -1315,6 +1332,8 @@ jv jq_next(jq_state *jq) {
       jq_state *child = jq_init();
       if (jv_is_valid(options))
         jq_set_attrs(jq, jv_copy(options));
+
+      child->input_mode = JQ_INPUT_RETURN_EMPTY;
 
       /* Give the child a way to report errors */
       jv *p = jv_mem_calloc(1, sizeof(jv));
@@ -1468,6 +1487,7 @@ jq_state *jq_init(void) {
   jq->input_cb_data = 0;
 
   jq->start_input = jv_invalid();
+  jq->input_mode = JQ_INPUT_DEFAULT;
 
   jq->vmid = jv_number_random_int();
   jq->rnd = jv_number_random_int();
@@ -1565,6 +1585,7 @@ static jq_state *coinit(jq_state *parent, uint16_t* start_pc) {
    * client.
    */
   jq_set_input_cb(child, coinput_cb, &child->start_input);
+  child->input_mode = JQ_INPUT_RETURN_EMPTY;
 
   return child;
 }
@@ -2134,6 +2155,23 @@ jv jq_get_exit_code(jq_state *jq)
 jv jq_get_error_message(jq_state *jq)
 {
   return jv_copy(jq->error_message);
+}
+
+void jq_set_input_mode(jq_state* jq, jq_input_mode mode) {
+  jq->input_mode = mode;
+}
+
+jq_input_mode jq_get_input_mode(jq_state* jq) {
+  return jq->input_mode;
+}
+
+void jq_set_input(jq_state* jq, jv start_input) {
+  jv_free(jq->start_input);
+  jq->start_input = start_input;
+}
+
+jv jq_get_input_copy(jq_state* jq) {
+  return jv_copy(jq->start_input);
 }
 
 jv jq_io_policy_check(jq_state *jq, jv req) {
