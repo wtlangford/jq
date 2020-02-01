@@ -902,7 +902,7 @@ jv jq_next(jq_state *jq) {
         is_last = idx == len - 1;
         if (keep_going) {
           key = jv_number(idx);
-          value = jv_array_get(jv_copy(container), jq->subexp_nest ? idx : len - (idx + 1));
+          value = jv_array_get(jv_copy(container), idx);
         }
       } else if (jv_get_kind(container) == JV_KIND_OBJECT) {
         if (opcode == EACH || opcode == EACH_OPT) idx = jv_object_iter(container);
