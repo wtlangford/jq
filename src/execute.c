@@ -1213,12 +1213,14 @@ jv jq_next(jq_state *jq) {
       initial_execution = 0;
       /* fallthrough, to the input */
     case ON_BACKTRACK(START): {
-      // we do different things for main program and for coroutines
-      // because backward compatibility is a bitch
-      //
-      // main:  if the jq->start_input is invalid, return invalid()
-      //        so that the caller may decide how to proceed
-      // coexp: if the jq_start_input is invalid, return invalid()
+
+      if(raising) {
+        // we are raising and backtracked up to here
+        // this is an unhandled user error, halt and return it
+        jq->halted = 1;
+        return jv_copy(jq->error);
+      }
+
       jv start_input = jq->start_input;
       jq->start_input = jv_invalid();
 
