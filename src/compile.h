@@ -21,6 +21,7 @@ int block_is_noop(block b);
 block gen_marker(opcode op);
 block gen_op_simple(opcode op);
 block gen_const(jv constant);
+block gen_op_const(opcode op, jv constant);
 block gen_const_global(jv constant, const char *name);
 int block_is_const(block b);
 int block_is_const_inf(block b);
@@ -60,6 +61,7 @@ block gen_object_matcher(block name, block curr);
 block gen_destructure(block var, block matcher, block body);
 block gen_destructure_alt(block matcher);
 block gen_coexpression_with_param_name(const char* param);
+block gen_protect_with_param_name(const char* param);
 
 block gen_cond(block cond, block iftrue, block iffalse);
 block gen_try(block exp, block handler);
