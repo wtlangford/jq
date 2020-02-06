@@ -878,7 +878,7 @@ jv jq_next(jq_state *jq) {
     }
 
     case STOREVN:
-      stack_save(jq, BT_DESC_NEXT_VALUE,  pc - 1, stack_get_pos(jq));
+      stack_save(jq, BT_DESC_PROTECT,  pc - 1, stack_get_pos(jq));
       /* fallthru */
     case STOREV: {
       uint16_t level = *pc++;  
