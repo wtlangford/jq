@@ -509,8 +509,13 @@ block block_inline(block inlines, block body) {
   inst *b;
   block result = body;
 
-  for (i = inlines.first; i && body.first; i = i->next) {
-    for (b = body.first; b; b = b->next) {
+  for (b = body.first; b; b = b->next) {
+    if (b->any_unbound == 0) {
+      continue;
+    }
+
+    for (i = inlines.first; i; i = i->next) {
+
       if (b->op == CALL_JQ && !b->bound_by && strcmp(b->symbol, i->symbol) == 0 &&
           b->nactuals == i->nformals) {
 
