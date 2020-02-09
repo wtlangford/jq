@@ -1392,17 +1392,11 @@ jv jq_next(jq_state *jq) {
       jv value = stack_pop(jq);
       assert(jq->stk_top == frame_current(jq)->retdata);
       uint16_t* retaddr = frame_current(jq)->retaddr;
-      if (retaddr) {
-        // function return
-        pc = retaddr;
-        frame_pop(jq);
-      } else {
-        // top-level return, yielding value
-        struct stack_pos spos = stack_get_pos(jq);
-        stack_push(jq, jv_null());
-        stack_save(jq, pc - 1, spos);
-        return value;
-      }
+
+      assert(retaddr);
+      
+      pc = retaddr;
+      frame_pop(jq);
       stack_push(jq, value);
       break;
     }
