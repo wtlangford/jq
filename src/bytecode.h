@@ -3,8 +3,10 @@
 #include <stdint.h>
 
 #include "jv.h"
+#include "jq.h"
+#include "jq_plugin.h"
 
-typedef enum {
+typedef enum opcode {
 #define OP(name, imm, in, out) name,
 #include "opcode_list.h"
 #undef OP
@@ -17,14 +19,15 @@ enum {
 #undef OP
 };
 
-enum {
-  OP_HAS_CONSTANT = 2,
-  OP_HAS_VARIABLE = 4,
-  OP_HAS_BRANCH = 8,
-  OP_HAS_CFUNC = 32,
-  OP_HAS_UFUNC = 64,
-  OP_IS_CALL_PSEUDO = 128,
-  OP_HAS_BINDING = 1024,
+enum op_flag {
+  OP_HAS_CONSTANT = 1 << 1,
+  OP_HAS_VARIABLE = 1 << 2,
+  OP_HAS_BRANCH = 1 << 3,
+  OP_HAS_CFUNC = 1 << 4,
+  OP_HAS_UFUNC = 1 << 5,
+  OP_IS_CALL_PSEUDO = 1 << 6,
+  OP_HAS_BINDING = 1 << 7,
+  OP_BACKTRACKS = 1 << 8,
   // NOTE: Not actually part of any op -- a pseudo-op flag for special
   //       handling of `break`.
   OP_BIND_WILDCARD = 2048,
@@ -42,15 +45,6 @@ struct opcode_description {
 };
 
 const struct opcode_description* opcode_describe(opcode op);
-
-
-#define MAX_CFUNCTION_ARGS 10
-typedef void (*cfunction_ptr)();
-struct cfunction {
-  cfunction_ptr fptr;
-  const char* name;
-  int nargs;
-};
 
 struct symbol_table {
   struct cfunction* cfunctions;

@@ -34,6 +34,9 @@ void *alloca (size_t);
 #endif
 #include <string.h>
 #include <time.h>
+#ifdef WIN32
+#include <windows.h>
+#endif
 #include "builtin.h"
 #include "compile.h"
 #include "jq_parser.h"
@@ -87,8 +90,11 @@ static jv f_plus(jq_state *jq, jv input, jv a, jv b) {
     jv_free(b);
     return a;
   } else if (jv_get_kind(a) == JV_KIND_NUMBER && jv_get_kind(b) == JV_KIND_NUMBER) {
-    return jv_number(jv_number_value(a) +
+    jv r = jv_number(jv_number_value(a) +
                      jv_number_value(b));
+    jv_free(a);
+    jv_free(b);
+    return r;
   } else if (jv_get_kind(a) == JV_KIND_STRING && jv_get_kind(b) == JV_KIND_STRING) {
     return jv_string_concat(a, b);
   } else if (jv_get_kind(a) == JV_KIND_ARRAY && jv_get_kind(b) == JV_KIND_ARRAY) {
@@ -271,7 +277,10 @@ static jv f_rtrimstr(jq_state *jq, jv input, jv right) {
 static jv f_minus(jq_state *jq, jv input, jv a, jv b) {
   jv_free(input);
   if (jv_get_kind(a) == JV_KIND_NUMBER && jv_get_kind(b) == JV_KIND_NUMBER) {
-    return jv_number(jv_number_value(a) - jv_number_value(b));
+    jv r = jv_number(jv_number_value(a) - jv_number_value(b));
+    jv_free(a);
+    jv_free(b);
+    return r;
   } else if (jv_get_kind(a) == JV_KIND_ARRAY && jv_get_kind(b) == JV_KIND_ARRAY) {
     jv out = jv_array();
     jv_array_foreach(a, i, x) {
@@ -299,7 +308,10 @@ static jv f_multiply(jq_state *jq, jv input, jv a, jv b) {
   jv_kind bk = jv_get_kind(b);
   jv_free(input);
   if (ak == JV_KIND_NUMBER && bk == JV_KIND_NUMBER) {
-    return jv_number(jv_number_value(a) * jv_number_value(b));
+    jv r = jv_number(jv_number_value(a) * jv_number_value(b));
+    jv_free(a);
+    jv_free(b);
+    return r;
   } else if ((ak == JV_KIND_STRING && bk == JV_KIND_NUMBER) ||
              (ak == JV_KIND_NUMBER && bk == JV_KIND_STRING)) {
     jv str = a;
@@ -333,7 +345,10 @@ static jv f_divide(jq_state *jq, jv input, jv a, jv b) {
   if (jv_get_kind(a) == JV_KIND_NUMBER && jv_get_kind(b) == JV_KIND_NUMBER) {
     if (jv_number_value(b) == 0.0)
       return type_error2(a, b, "cannot be divided because the divisor is zero");
-    return jv_number(jv_number_value(a) / jv_number_value(b));
+    jv r = jv_number(jv_number_value(a) / jv_number_value(b));
+    jv_free(a);
+    jv_free(b);
+    return r;
   } else if (jv_get_kind(a) == JV_KIND_STRING && jv_get_kind(b) == JV_KIND_STRING) {
     return jv_string_split(a, b);
   } else {
@@ -346,7 +361,10 @@ static jv f_mod(jq_state *jq, jv input, jv a, jv b) {
   if (jv_get_kind(a) == JV_KIND_NUMBER && jv_get_kind(b) == JV_KIND_NUMBER) {
     if ((intmax_t)jv_number_value(b) == 0)
       return type_error2(a, b, "cannot be divided (remainder) because the divisor is zero");
-    return jv_number((intmax_t)jv_number_value(a) % (intmax_t)jv_number_value(b));
+    jv r = jv_number((intmax_t)jv_number_value(a) % (intmax_t)jv_number_value(b));
+    jv_free(a);
+    jv_free(b);
+    return r;
   } else {
     return type_error2(a, b, "cannot be divided (remainder)");
   }
@@ -437,7 +455,9 @@ static jv f_length(jq_state *jq, jv input) {
   } else if (jv_get_kind(input) == JV_KIND_STRING) {
     return jv_number(jv_string_length_codepoints(input));
   } else if (jv_get_kind(input) == JV_KIND_NUMBER) {
-    return jv_number(fabs(jv_number_value(input)));
+    jv r = jv_number(fabs(jv_number_value(input)));
+    jv_free(input);
+    return r;
   } else if (jv_get_kind(input) == JV_KIND_NULL) {
     jv_free(input);
     return jv_number(0);
@@ -862,7 +882,7 @@ static jv f_match(jq_state *jq, jv input, jv regex, jv modifiers, jv testmode) {
       if (region->end[0] == region->beg[0]) {
         unsigned long idx;
         const char *fr = (const char*)input_string;
-        for (idx = 0; fr != input_string+region->beg[0]; idx++) {
+        for (idx = 0; fr < input_string+region->beg[0]; idx++) {
           fr += jvp_utf8_decode_length(*fr);
         }
         jv match = jv_object_set(jv_object(), jv_string("offset"), jv_number(idx));
@@ -899,7 +919,7 @@ static jv f_match(jq_state *jq, jv input, jv regex, jv modifiers, jv testmode) {
             cap = jv_object_set(cap, jv_string("string"), jv_null());
           } else {
             fr = input_string;
-            for (idx = 0; fr != input_string+region->beg[i]; idx++) {
+            for (idx = 0; fr < input_string+region->beg[i]; idx++) {
               fr += jvp_utf8_decode_length(*fr);
             }
             cap = jv_object_set(jv_object(), jv_string("offset"), jv_number(idx));
@@ -911,7 +931,7 @@ static jv f_match(jq_state *jq, jv input, jv regex, jv modifiers, jv testmode) {
           continue;
         }
         fr = input_string;
-        for (idx = len = 0; fr != input_string+region->end[i]; len++) {
+        for (idx = len = 0; fr < input_string+region->end[i]; len++) {
           if (fr == input_string+region->beg[i]) idx = len, len=0;
           fr += jvp_utf8_decode_length(*fr);
         }
@@ -932,7 +952,7 @@ static jv f_match(jq_state *jq, jv input, jv regex, jv modifiers, jv testmode) {
       break;
     } else { /* Error */
       UChar ebuf[ONIG_MAX_ERROR_MESSAGE_LEN];
-      onig_error_code_to_str(ebuf, onigret, einfo);
+      onig_error_code_to_str(ebuf, onigret, &einfo);
       jv_free(result);
       result = jv_invalid_with_msg(jv_string_concat(jv_string("Regex failure: "),
             jv_string((char*)ebuf)));
@@ -950,7 +970,7 @@ static jv f_match(jq_state *jq, jv input, jv regex, jv modifiers, jv testmode) {
 }
 #else /* !HAVE_LIBONIG */
 static jv f_match(jq_state *jq, jv input, jv regex, jv modifiers, jv testmode) {
-  return jv_invalid_with_msg(jv_string("jq was compiled without ONIGURUMA regex libary. match/test/sub and related functions are not available."));
+  return jv_invalid_with_msg(jv_string("jq was compiled without ONIGURUMA regex library. match/test/sub and related functions are not available."));
 }
 #endif /* HAVE_LIBONIG */
 
@@ -1053,14 +1073,14 @@ static jv f_nan(jq_state *jq, jv input) {
   return jv_number(NAN);
 }
 
-static jv f_error(jq_state *jq, jv input, jv msg) {
-  jv_free(input);
-  return jv_invalid_with_msg(msg);
-}
-
 // FIXME Should autoconf check for this!
 #ifndef WIN32
-extern char **environ;
+#  ifdef __APPLE__
+#    include <crt_externs.h>
+#    define environ (*_NSGetEnviron())
+#  else
+     extern char ** environ;
+#  endif
 #endif
 
 static jv f_env(jq_state *jq, jv input) {
@@ -1186,6 +1206,27 @@ static jv tm2jv(struct tm *tm) {
                   jv_number(tm->tm_yday));
 }
 
+#if defined(WIN32) && !defined(HAVE_SETENV)
+static int setenv(const char *var, const char *val, int ovr)
+{
+  BOOL b;
+  char c[2];
+  if (!ovr)
+  {
+    DWORD d;
+    d = GetEnvironmentVariableA (var, c, 2);
+    if (0 != d && GetLastError () != ERROR_ENVVAR_NOT_FOUND) {
+      return d;
+    }
+  }
+  b = SetEnvironmentVariableA (var, val);
+  if (b) {
+    return 0;
+  }
+  return 1;
+}
+#endif
+
 /*
  * mktime() has side-effects and anyways, returns time in the local
  * timezone, not UTC.  We want timegm(), which isn't standard.
@@ -1201,10 +1242,23 @@ static jv tm2jv(struct tm *tm) {
  *
  * Returns (time_t)-2 if mktime()'s side-effects cannot be corrected.
  */
-static time_t my_timegm(struct tm *tm) {
+static time_t my_mktime(struct tm *tm) {
 #ifdef HAVE_TIMEGM
   return timegm(tm);
-#else /* HAVE_TIMEGM */
+#elif HAVE_TM_TM_GMT_OFF
+
+  time_t t = mktime(tm);
+  if (t == (time_t)-1)
+    return t;
+  return t + tm->tm_gmtoff;
+#elif HAVE_TM___TM_GMT_OFF
+  time_t t = mktime(tm);
+  if (t == (time_t)-1)
+    return t;
+  return t + tm->__tm_gmtoff;
+#elif WIN32
+  return _mkgmtime(tm);
+#else
   char *tz;
 
   tz = (tz = getenv("TZ")) != NULL ? strdup(tz) : NULL;
@@ -1214,18 +1268,6 @@ static time_t my_timegm(struct tm *tm) {
   if (tz != NULL)
     setenv("TZ", tz, 1);
   return t;
-#endif /* !HAVE_TIMEGM */
-}
-static time_t my_mktime(struct tm *tm) {
-  time_t t = mktime(tm);
-  if (t == (time_t)-1)
-    return t;
-#ifdef HAVE_TM_TM_GMT_OFF
-  return t + tm->tm_gmtoff;
-#elif HAVE_TM___TM_GMT_OFF
-  return t + tm->__tm_gmtoff;
-#else
-  return (time_t)-2; /* Not supported */
 #endif
 }
 
@@ -1286,7 +1328,25 @@ static void set_tm_yday(struct tm *tm) {
   tm->tm_yday = yday;
 }
 
-#ifdef HAVE_STRPTIME
+#ifndef HAVE_STRPTIME
+static char *strptime(const char *s, const char *format, struct tm *tm) {
+  if (strcmp(format, "%Y-%m-%dT%H:%M:%SZ"))
+    return NULL;
+
+  int count, end;
+  count = sscanf(s, "%d-%d-%dT%d:%d:%d%n",
+                    &tm->tm_year, &tm->tm_mon, &tm->tm_mday,
+                    &tm->tm_hour, &tm->tm_min, &tm->tm_sec,
+                    &end );
+  if (count == 6 && s[end] == 'Z') {
+    tm->tm_year -= 1900;
+    tm->tm_mon--;
+    return (char*)s + end + 1;
+  }
+  return NULL;
+}
+#endif
+
 static jv f_strptime(jq_state *jq, jv a, jv b) {
   if (jv_get_kind(a) != JV_KIND_STRING || jv_get_kind(b) != JV_KIND_STRING) {
     return ret_error2(a, b, jv_string("strptime/1 requires string inputs and arguments"));
@@ -1298,8 +1358,13 @@ static jv f_strptime(jq_state *jq, jv a, jv b) {
   tm.tm_yday = 367; // sentinel
   const char *input = jv_string_value(a);
   const char *fmt = jv_string_value(b);
-  const char *end = strptime(input, fmt, &tm);
 
+#ifndef HAVE_STRPTIME
+  if (strcmp(fmt, "%Y-%m-%dT%H:%M:%SZ")) {
+    return ret_error2(a, b, jv_string("strptime/1 only supports ISO 8601 on this platform"));
+  }
+#endif
+  const char *end = strptime(input, fmt, &tm);
   if (end == NULL || (*end != '\0' && !isspace(*end))) {
     return ret_error2(a, b, jv_string_fmt("date \"%s\" does not match format \"%s\"", input, fmt));
   }
@@ -1336,13 +1401,6 @@ static jv f_strptime(jq_state *jq, jv a, jv b) {
   jv_free(a); // must come after `*end` because `end` is a pointer into `a`'s string
   return r;
 }
-#else
-static jv f_strptime(jq_state *jq, jv a, jv b) {
-  jv_free(a);
-  jv_free(b);
-  return jv_invalid_with_msg(jv_string("strptime/1 not implemented on this platform"));
-}
-#endif
 
 #define TO_TM_FIELD(t, j, i)                    \
     do {                                        \
@@ -1547,6 +1605,96 @@ static jv f_now(jq_state *jq, jv a) {
 }
 #endif
 
+static jv f_vmid(jq_state *jq, jv a) {
+  jv_free(a);
+  return jq_get_vmid(jq);
+}
+
+static jv coreset(jq_state *parent, jv input, void *vchild) {
+  jq_state *child = vchild;
+  jq_start(child, jv_null(), 0);
+  jv_free(input);
+  return jv_true();
+}
+
+static jv coinput_cb(jq_state *child, void *vjv) {
+  jv *jvp = vjv;
+  jv ret;
+
+  if (jv_is_valid(*jvp) || jv_invalid_has_msg(jv_copy(*jvp))) {
+    ret = *jvp;
+    *jvp = jv_invalid();
+    return ret;
+  }
+  return jv_invalid();
+}
+
+static jv cowrite(jq_state *parent, jv handle, void *vchild, jv v) {
+  jq_state *child = vchild;
+  jq_input_cb junk;
+  jv *jvp;
+  jq_get_input_cb(child, &junk, (void **)&jvp);
+  jv_free(*jvp);
+  *jvp = jv_copy(v);
+  jv_free(handle);
+  return v;
+}
+
+static jv coread(jq_state *parent, jv handle, void *vchild) {
+  jq_state *child = vchild;
+  jv_free(handle);
+  if (child == parent)
+    return jv_invalid_with_msg(jv_string("Co-routines cannot call themselves"));
+  if (jq_finished(child))
+    return jv_invalid();
+  return jq_next(child);
+}
+
+static jv coeof(jq_state *parent, jv handle, void *vchild) {
+  jq_state *child = vchild;
+  jv_free(handle);
+  return jq_finished(child) ? jv_true() : jv_false();
+}
+
+static jv coclose(jq_state *parent, jv handle, void *vchild) {
+  jq_state *child = vchild;
+  if (child)
+    jq_teardown(&child);
+  jv_free(handle);
+  return jv_true();
+}
+
+struct jq_io_table jq__covt = {
+  .kind = "coroutine",
+  .fhclose = coclose,
+  .fhreset = coreset,
+  .fhwrite = cowrite,
+  .fhread = coread,
+  .fhstat = 0,
+  .fheof = coeof,
+};
+
+static jv f_random_int(jq_state *jq, jv a) {
+  jv_free(a);
+  return jv_number_random_int();
+}
+
+static jv f_random_bytes(jq_state *jq, jv a) {
+  if (jv_get_kind(a) != JV_KIND_NUMBER)
+    return jv_invalid_with_msg(jv_string("randombytes needs an integer input"));
+  size_t n = jv_number_value(a);
+  jv_free(a);
+  return jv_number_random_bytes(n);
+}
+
+static jv f_random_string(jq_state *jq, jv a) {
+  if (jv_get_kind(a) != JV_KIND_NUMBER)
+    return jv_invalid_with_msg(jv_string("randomstring needs an integer input"));
+  size_t n = jv_number_value(a);
+  jv_free(a);
+  return jv_number_random_string(n);
+}
+
 static jv f_current_filename(jq_state *jq, jv a) {
   jv_free(a);
 
@@ -1562,96 +1710,106 @@ static jv f_current_line(jq_state *jq, jv a) {
 }
 
 #define LIBM_DD(name) \
-  {(cfunction_ptr)f_ ## name,  #name, 1},
+  {(cfunction_ptr)f_ ## name,  #name, 1, 1, 1},
 #define LIBM_DD_NO(name)
 
 #define LIBM_DDD(name) \
-  {(cfunction_ptr)f_ ## name, #name, 3},
+  {(cfunction_ptr)f_ ## name, #name, 3, 1, 1},
 #define LIBM_DDD_NO(name)
 
 #define LIBM_DDDD(name) \
-  {(cfunction_ptr)f_ ## name, #name, 4},
+  {(cfunction_ptr)f_ ## name, #name, 4, 1, 1},
 #define LIBM_DDDD_NO(name)
 
 static const struct cfunction function_list[] = {
 #include "libm.h"
 #ifdef HAVE_FREXP
-  {(cfunction_ptr)f_frexp,"frexp", 1},
+  {(cfunction_ptr)f_frexp,"frexp", 1, 1, 1},
 #endif
 #ifdef HAVE_MODF
-  {(cfunction_ptr)f_modf,"modf", 1},
+  {(cfunction_ptr)f_modf,"modf", 1, 1, 1},
 #endif
 #ifdef HAVE_LGAMMA_R
-  {(cfunction_ptr)f_lgamma_r,"lgamma_r", 1},
+  {(cfunction_ptr)f_lgamma_r,"lgamma_r", 1, 1, 1},
 #endif
-  {(cfunction_ptr)f_plus, "_plus", 3},
-  {(cfunction_ptr)f_negate, "_negate", 1},
-  {(cfunction_ptr)f_minus, "_minus", 3},
-  {(cfunction_ptr)f_multiply, "_multiply", 3},
-  {(cfunction_ptr)f_divide, "_divide", 3},
-  {(cfunction_ptr)f_mod, "_mod", 3},
-  {(cfunction_ptr)f_dump, "tojson", 1},
-  {(cfunction_ptr)f_json_parse, "fromjson", 1},
-  {(cfunction_ptr)f_tonumber, "tonumber", 1},
-  {(cfunction_ptr)f_tostring, "tostring", 1},
-  {(cfunction_ptr)f_keys, "keys", 1},
-  {(cfunction_ptr)f_keys_unsorted, "keys_unsorted", 1},
-  {(cfunction_ptr)f_startswith, "startswith", 2},
-  {(cfunction_ptr)f_endswith, "endswith", 2},
-  {(cfunction_ptr)f_ltrimstr, "ltrimstr", 2},
-  {(cfunction_ptr)f_rtrimstr, "rtrimstr", 2},
-  {(cfunction_ptr)f_string_split, "split", 2},
-  {(cfunction_ptr)f_string_explode, "explode", 1},
-  {(cfunction_ptr)f_string_implode, "implode", 1},
-  {(cfunction_ptr)f_string_indexes, "_strindices", 2},
-  {(cfunction_ptr)f_setpath, "setpath", 3}, // FIXME typechecking
-  {(cfunction_ptr)f_getpath, "getpath", 2},
-  {(cfunction_ptr)f_delpaths, "delpaths", 2},
-  {(cfunction_ptr)f_has, "has", 2},
-  {(cfunction_ptr)f_equal, "_equal", 3},
-  {(cfunction_ptr)f_notequal, "_notequal", 3},
-  {(cfunction_ptr)f_less, "_less", 3},
-  {(cfunction_ptr)f_greater, "_greater", 3},
-  {(cfunction_ptr)f_lesseq, "_lesseq", 3},
-  {(cfunction_ptr)f_greatereq, "_greatereq", 3},
-  {(cfunction_ptr)f_contains, "contains", 2},
-  {(cfunction_ptr)f_length, "length", 1},
-  {(cfunction_ptr)f_utf8bytelength, "utf8bytelength", 1},
-  {(cfunction_ptr)f_type, "type", 1},
-  {(cfunction_ptr)f_isinfinite, "isinfinite", 1},
-  {(cfunction_ptr)f_isnan, "isnan", 1},
-  {(cfunction_ptr)f_isnormal, "isnormal", 1},
-  {(cfunction_ptr)f_infinite, "infinite", 1},
-  {(cfunction_ptr)f_nan, "nan", 1},
-  {(cfunction_ptr)f_sort, "sort", 1},
-  {(cfunction_ptr)f_sort_by_impl, "_sort_by_impl", 2},
-  {(cfunction_ptr)f_group_by_impl, "_group_by_impl", 2},
-  {(cfunction_ptr)f_min, "min", 1},
-  {(cfunction_ptr)f_max, "max", 1},
-  {(cfunction_ptr)f_min_by_impl, "_min_by_impl", 2},
-  {(cfunction_ptr)f_max_by_impl, "_max_by_impl", 2},
-  {(cfunction_ptr)f_error, "error", 2},
-  {(cfunction_ptr)f_format, "format", 2},
-  {(cfunction_ptr)f_env, "env", 1},
-  {(cfunction_ptr)f_halt, "halt", 1},
-  {(cfunction_ptr)f_halt_error, "halt_error", 2},
-  {(cfunction_ptr)f_get_search_list, "get_search_list", 1},
-  {(cfunction_ptr)f_get_prog_origin, "get_prog_origin", 1},
-  {(cfunction_ptr)f_get_jq_origin, "get_jq_origin", 1},
-  {(cfunction_ptr)f_match, "_match_impl", 4},
-  {(cfunction_ptr)f_modulemeta, "modulemeta", 1},
-  {(cfunction_ptr)f_input, "_input", 1},
-  {(cfunction_ptr)f_debug, "debug", 1},
-  {(cfunction_ptr)f_stderr, "stderr", 1},
-  {(cfunction_ptr)f_strptime, "strptime", 2},
-  {(cfunction_ptr)f_strftime, "strftime", 2},
-  {(cfunction_ptr)f_strflocaltime, "strflocaltime", 2},
-  {(cfunction_ptr)f_mktime, "mktime", 1},
-  {(cfunction_ptr)f_gmtime, "gmtime", 1},
-  {(cfunction_ptr)f_localtime, "localtime", 1},
-  {(cfunction_ptr)f_now, "now", 1},
-  {(cfunction_ptr)f_current_filename, "input_filename", 1},
-  {(cfunction_ptr)f_current_line, "input_line_number", 1},
+  {(cfunction_ptr)f_plus, "_plus", 3, 1, 1},
+  {(cfunction_ptr)f_negate, "_negate", 1, 1, 1},
+  {(cfunction_ptr)f_minus, "_minus", 3, 1, 1},
+  {(cfunction_ptr)f_multiply, "_multiply", 3, 1, 1},
+  {(cfunction_ptr)f_divide, "_divide", 3, 1, 1},
+  {(cfunction_ptr)f_mod, "_mod", 3, 1, 1},
+  {(cfunction_ptr)f_dump, "tojson", 1, 1, 1},
+  {(cfunction_ptr)f_json_parse, "fromjson", 1, 1, 1},
+  {(cfunction_ptr)f_tonumber, "tonumber", 1, 1, 1},
+  {(cfunction_ptr)f_tostring, "tostring", 1, 1, 1},
+  {(cfunction_ptr)f_keys, "keys", 1, 1, 1},
+  {(cfunction_ptr)f_keys_unsorted, "keys_unsorted", 1, 1, 1},
+  {(cfunction_ptr)f_startswith, "startswith", 2, 1, 1},
+  {(cfunction_ptr)f_endswith, "endswith", 2, 1, 1},
+  {(cfunction_ptr)f_ltrimstr, "ltrimstr", 2, 1, 1},
+  {(cfunction_ptr)f_rtrimstr, "rtrimstr", 2, 1, 1},
+  {(cfunction_ptr)f_string_split, "split", 2, 1, 1},
+  {(cfunction_ptr)f_string_explode, "explode", 1, 1, 1},
+  {(cfunction_ptr)f_string_implode, "implode", 1, 1, 1},
+  {(cfunction_ptr)f_string_indexes, "_strindices", 2, 1, 1},
+  {(cfunction_ptr)f_setpath, "setpath", 3, 1, 1}, // FIXME typechecking
+  {(cfunction_ptr)f_getpath, "getpath", 2, 1, 1},
+  {(cfunction_ptr)f_delpaths, "delpaths", 2, 1, 1},
+  {(cfunction_ptr)f_has, "has", 2, 1, 1},
+  {(cfunction_ptr)f_equal, "_equal", 3, 1, 1},
+  {(cfunction_ptr)f_notequal, "_notequal", 3, 1, 1},
+  {(cfunction_ptr)f_less, "_less", 3, 1, 1},
+  {(cfunction_ptr)f_greater, "_greater", 3, 1, 1},
+  {(cfunction_ptr)f_lesseq, "_lesseq", 3, 1, 1},
+  {(cfunction_ptr)f_greatereq, "_greatereq", 3, 1, 1},
+  {(cfunction_ptr)f_contains, "contains", 2, 1, 1},
+  {(cfunction_ptr)f_length, "length", 1, 1, 1},
+  {(cfunction_ptr)f_utf8bytelength, "utf8bytelength", 1, 1, 1},
+  {(cfunction_ptr)f_type, "type", 1, 1, 1},
+  {(cfunction_ptr)f_isinfinite, "isinfinite", 1, 1, 1},
+  {(cfunction_ptr)f_isnan, "isnan", 1, 1, 1},
+  {(cfunction_ptr)f_isnormal, "isnormal", 1, 1, 1},
+  {(cfunction_ptr)f_infinite, "infinite", 1, 1, 1},
+  {(cfunction_ptr)f_nan, "nan", 1, 1, 1},
+  {(cfunction_ptr)f_sort, "sort", 1, 1, 1},
+  {(cfunction_ptr)f_sort_by_impl, "_sort_by_impl", 2, 1, 1},
+  {(cfunction_ptr)f_group_by_impl, "_group_by_impl", 2, 1, 1},
+  {(cfunction_ptr)f_min, "min", 1, 1, 1},
+  {(cfunction_ptr)f_max, "max", 1, 1, 1},
+  {(cfunction_ptr)f_min_by_impl, "_min_by_impl", 2, 1, 1},
+  {(cfunction_ptr)f_max_by_impl, "_max_by_impl", 2, 1, 1},
+  {(cfunction_ptr)f_format, "format", 2, 1, 1},
+  {(cfunction_ptr)f_env, "env", 1, 0, 1},
+  {(cfunction_ptr)f_halt, "halt", 1, 0, 1},
+  {(cfunction_ptr)f_halt_error, "halt_error", 2, 0, 1},
+  {(cfunction_ptr)f_get_search_list, "get_search_list", 1, 0, 1},
+  {(cfunction_ptr)f_get_prog_origin, "get_prog_origin", 1, 0, 1},
+  {(cfunction_ptr)f_get_jq_origin, "get_jq_origin", 1, 0, 1},
+  {(cfunction_ptr)f_match, "_match_impl", 4, 1, 1},
+  {(cfunction_ptr)f_modulemeta, "modulemeta", 1, 0, 1},
+  {(cfunction_ptr)f_input, "input", 1, 0, 1},
+  {(cfunction_ptr)f_debug, "debug", 1, 0, 1},
+  {(cfunction_ptr)f_stderr, "stderr", 1, 0, 1},
+  {(cfunction_ptr)f_strptime, "strptime", 2, 1, 1},
+  {(cfunction_ptr)f_strftime, "strftime", 2, 1, 1},
+  {(cfunction_ptr)f_strflocaltime, "strflocaltime", 2, 1, 1},
+  {(cfunction_ptr)f_mktime, "mktime", 1, 1, 1},
+  {(cfunction_ptr)f_gmtime, "gmtime", 1, 1, 1},
+  {(cfunction_ptr)f_localtime, "localtime", 1, 1, 1},
+  {(cfunction_ptr)f_now, "now", 1, 0, 1},
+  {(cfunction_ptr)f_vmid, "vmid", 1, 0, 1},
+  {(cfunction_ptr)f_random_int, "random", 1, 0, 1},
+  {(cfunction_ptr)f_random_bytes, "randombytes", 1, 0, 1},
+  {(cfunction_ptr)f_random_string, "randomstring", 1, 0, 1},
+  {(cfunction_ptr)f_current_filename, "input_filename", 1, 0, 1},
+  {(cfunction_ptr)f_current_line, "input_line_number", 1, 0, 1},
+  {(cfunction_ptr)jq_handle_get_kind, "fhkind", 1, 0, 1},
+  {(cfunction_ptr)jq_handle_close, "fhclose", 1, 0, 1},
+  {(cfunction_ptr)jq_handle_reset, "fhreset", 1, 0, 1},
+  {(cfunction_ptr)jq_handle_write, "fhwrite", 2, 0, 1},
+  {(cfunction_ptr)jq_handle_read, "fhread", 1, 0, 1},
+  {(cfunction_ptr)jq_handle_stat, "fhstat", 1, 0, 1},
+  {(cfunction_ptr)jq_handle_eof, "fheof", 1, 0, 1},
 };
 #undef LIBM_DDDD_NO
 #undef LIBM_DDD_NO
@@ -1660,16 +1818,88 @@ static const struct cfunction function_list[] = {
 #undef LIBM_DDD
 #undef LIBM_DD
 
+
 struct bytecoded_builtin { const char* name; block code; };
+static block private_inlines(void) {
+  block builtins = gen_noop();
+  /*
+    * The following are all special bytecoded builtins that only jq-coded
+    * builtins should be able to use.  User programs should not be able to use
+    * them, otherwise they could corrupt jq VMs.
+    *
+    * We'll inline these.
+    */
+  {
+    struct bytecoded_builtin builtin_defs[] = {
+      {"coeval", gen_op_simple(COEVAL)},
+    };
+    for (unsigned i=0; i<sizeof(builtin_defs)/sizeof(builtin_defs[0]); i++) {
+      builtins = BLOCK(builtins, gen_function(builtin_defs[i].name, gen_noop(),
+                                              builtin_defs[i].code));
+    }
+  }
+  {
+    struct bytecoded_builtin builtin_def_1arg[] = {
+    };
+    for (unsigned i=0; i<sizeof(builtin_def_1arg)/sizeof(builtin_def_1arg[0]); i++) {
+      builtins = BLOCK(builtins, gen_function(builtin_def_1arg[i].name,
+                                              gen_param("arg"),
+                                              builtin_def_1arg[i].code));
+    }
+  }
+  return builtins;
+}
+
+static block public_inlines(void) {
+  block builtins = gen_noop();
+  /*
+    * The following are all special bytecoded builtins that only jq-coded
+    * builtins should be able to use.  User programs should not be able to use
+    * them, otherwise they could corrupt jq VMs.
+    *
+    * We'll inline these.
+    */
+  {
+    struct bytecoded_builtin builtin_defs[] = {
+      {"empty", gen_op_simple(BACKTRACK_0)},
+      {"error", gen_op_simple(RAISE)},
+      {"not", gen_condbranch(gen_const(jv_false()),
+                             gen_const(jv_true()))},
+      {"output", gen_op_simple(OUT)},
+    };
+    for (unsigned i=0; i<sizeof(builtin_defs)/sizeof(builtin_defs[0]); i++) {
+      builtins = BLOCK(builtins, gen_function(builtin_defs[i].name, gen_noop(),
+                                              builtin_defs[i].code));
+    }
+  }
+  {
+    struct bytecoded_builtin builtin_def_1arg[] = {
+      {"coexp", gen_coexpression_with_param_name("arg")},
+      {"protect", gen_protect_with_param_name("arg")}
+    };
+    for (unsigned i=0; i<sizeof(builtin_def_1arg)/sizeof(builtin_def_1arg[0]); i++) {
+      builtins = BLOCK(builtins, gen_function(builtin_def_1arg[i].name,
+                                              gen_param("arg"),
+                                              builtin_def_1arg[i].code));
+    }
+  }
+  return builtins;
+}
+
 static block bind_bytecoded_builtins(block b) {
   block builtins = gen_noop();
   {
     struct bytecoded_builtin builtin_defs[] = {
-      {"empty", gen_op_simple(BACKTRACK)},
-      {"not", gen_condbranch(gen_const(jv_false()),
-                             gen_const(jv_true()))}
     };
     for (unsigned i=0; i<sizeof(builtin_defs)/sizeof(builtin_defs[0]); i++) {
+      /*
+       * This results in a CALL_JQ instruction to call a function that has two
+       * instructions, the one instruction (e.g., BACKTRACK), and a RET_JQ.  So we
+       * use up to three instructions (the RET_JQ doesn't execute in the case of
+       * `empty`, naturally) to execute just one.
+       *
+       * We should inline `empty` and `unwinding` at least.
+       */
       builtins = BLOCK(builtins, gen_function(builtin_defs[i].name, gen_noop(),
                                               builtin_defs[i].code));
     }
@@ -1703,12 +1933,10 @@ static block bind_bytecoded_builtins(block b) {
                                             BLOCK(gen_param("start"), gen_param("end")),
                                             range));
   }
-  return block_bind(builtins, b, OP_IS_CALL_PSEUDO);
+  return BLOCK(builtins, b);
 }
 
-
-
-static const char* const jq_builtins =
+static const char jq_builtins[] =
 /* Include jq-coded builtins */
 #include "src/builtin.inc"
 
@@ -1739,51 +1967,44 @@ static const char* const jq_builtins =
 #undef LIBM_DD
 
 
-static block gen_builtin_list(block builtins) {
-  jv list = jv_array_append(block_list_funcs(builtins, 1), jv_string("builtins/0"));
+static block gen_builtin_list(block builtins, block inlines) {
+  jv list = block_list_funcs(inlines, 1);
+  list = jv_array_concat(list, block_list_funcs(builtins, 1));
+  list = jv_array_append(list, jv_string("builtins/0"));
   return BLOCK(builtins, gen_function("builtins", gen_noop(), gen_const(list)));
 }
 
-static int builtins_bind_one(jq_state *jq, block* bb, const char* code) {
-  struct locfile* src;
-  src = locfile_init(jq, "<builtin>", code, strlen(code));
-  block funcs;
-  int nerrors = jq_parse_library(src, &funcs);
-  if (nerrors == 0) {
-    *bb = block_bind(funcs, *bb, OP_IS_CALL_PSEUDO);
-  }
-  locfile_free(src);
-  return nerrors;
-}
-
-static int slurp_lib(jq_state *jq, block* bb) {
-  int nerrors = 0;
-  char* home = getenv("HOME");
-  if (home) {    // silently ignore no $HOME
-    jv filename = jv_string_append_str(jv_string(home), "/.jq");
-    jv data = jv_load_file(jv_string_value(filename), 1);
-    if (jv_is_valid(data)) {
-      nerrors = builtins_bind_one(jq, bb, jv_string_value(data) );
-    }
-    jv_free(filename);
-    jv_free(data);
-  }
-  return nerrors;
-}
+extern block block_inline(block inlines, block body);
 
 int builtins_bind(jq_state *jq, block* bb) {
-  block builtins = gen_noop();
-  int nerrors = slurp_lib(jq, bb);
-  if (nerrors) {
-    block_free(*bb);
-    return nerrors;
-  }
-  nerrors = builtins_bind_one(jq, &builtins, jq_builtins);
+  block builtins, in_priv, in_pub;
+  struct locfile* src = locfile_init(jq, "<builtin>", jq_builtins, sizeof(jq_builtins)-1);
+  int nerrors = jq_parse_library(src, &builtins);
   assert(!nerrors);
+  locfile_free(src);
+
+  in_pub = public_inlines();
+  in_priv = private_inlines();
+
   builtins = bind_bytecoded_builtins(builtins);
   builtins = gen_cbinding(function_list, sizeof(function_list)/sizeof(function_list[0]), builtins);
-  builtins = gen_builtin_list(builtins);
-  *bb = block_bind(builtins, *bb, OP_IS_CALL_PSEUDO);
-  *bb = block_drop_unreferenced(*bb);
+  builtins = gen_builtin_list(builtins, in_pub);
+
+  // private inlines are just for usage inside builtins
+  builtins = block_inline(in_priv, builtins);
+
+  // inline the publics before binding the user code, which may have
+  // its own definitions of the same functions (not our problem)
+  // here we make sure that at least our own builtins use the correc inlines
+  builtins = block_inline(in_pub, builtins);
+
+  *bb = block_bind_referenced(builtins, *bb, OP_IS_CALL_PSEUDO);
+
+  // now inline whatever publics are still unbound and matching in the user code
+  *bb = block_inline(in_pub, *bb);
+
+  block_free(in_pub);
+  block_free(in_priv);
+
   return nerrors;
 }

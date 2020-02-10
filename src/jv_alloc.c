@@ -37,7 +37,7 @@ static void memory_exhausted() {
   if (nomem_handler.handler)
     nomem_handler.handler(nomem_handler.data); // Maybe handler() will longjmp() to safety
   // Or not
-  fprintf(stderr, "error: cannot allocate memory\n");
+  fprintf(stderr, "jq: error: cannot allocate memory\n");
   abort();
 }
 #else /* USE_TLS */
@@ -59,16 +59,16 @@ static void tsd_fini(void) {
 
 static void tsd_init(void) {
   if (pthread_key_create(&nomem_handler_key, NULL) != 0) {
-    fprintf(stderr, "error: cannot create thread specific key");
+    fprintf(stderr, "jq: error: cannot create thread specific key");
     abort();
   }
   if (atexit(tsd_fini) != 0) {
-    fprintf(stderr, "error: cannot set an exit handler");
+    fprintf(stderr, "jq: error: cannot set an exit handler");
     abort();
   }
   struct nomem_handler *nomem_handler = calloc(1, sizeof(struct nomem_handler));
   if (pthread_setspecific(nomem_handler_key, nomem_handler) != 0) {
-    fprintf(stderr, "error: cannot set thread specific data");
+    fprintf(stderr, "jq: error: cannot set thread specific data");
     abort();
   }
 }
@@ -80,7 +80,7 @@ void jv_nomem_handler(jv_nomem_handler_f handler, void *data) {
   nomem_handler = pthread_getspecific(nomem_handler_key);
   if (nomem_handler == NULL) {
     handler(data);
-    fprintf(stderr, "error: cannot allocate memory\n");
+    fprintf(stderr, "jq: error: cannot allocate memory\n");
     abort();
   }
   nomem_handler->handler = handler;
@@ -95,7 +95,7 @@ static void memory_exhausted() {
   if (nomem_handler)
     nomem_handler->handler(nomem_handler->data); // Maybe handler() will longjmp() to safety
   // Or not
-  fprintf(stderr, "error: cannot allocate memory\n");
+  fprintf(stderr, "jq: error: cannot allocate memory\n");
   abort();
 }
 
@@ -110,7 +110,7 @@ void jv_nomem_handler(jv_nomem_handler_f handler, void *data) {
 }
 
 static void memory_exhausted() {
-  fprintf(stderr, "error: cannot allocate memory\n");
+  fprintf(stderr, "jq: error: cannot allocate memory\n");
   abort();
 }
 
@@ -120,7 +120,7 @@ static void memory_exhausted() {
 
 void* jv_mem_alloc(size_t sz) {
   void* p = malloc(sz);
-  if (!p) {
+  if (!p && sz) {
     memory_exhausted();
   }
   return p;
@@ -132,7 +132,7 @@ void* jv_mem_alloc_unguarded(size_t sz) {
 
 void* jv_mem_calloc(size_t nemb, size_t sz) {
   void* p = calloc(nemb, sz);
-  if (!p) {
+  if (!p && sz) {
     memory_exhausted();
   }
   return p;
@@ -160,7 +160,7 @@ void jv_mem_free(void* p) {
 
 void* jv_mem_realloc(void* p, size_t sz) {
   p = realloc(p, sz);
-  if (!p) {
+  if (!p && sz) {
     memory_exhausted();
   }
   return p;

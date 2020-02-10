@@ -49,9 +49,11 @@ struct inst {
   // Unbound instructions (references to other things that may or may not
   // exist) are created by "gen_foo_unbound", and bindings are created by
   // block_bind(definition, body), which binds all instructions in
-  // body which are unboudn and refer to "definition" by name.
+  // body which are unbound and refer to "definition" by name.
   struct inst* bound_by;
   char* symbol;
+  int any_unbound;
+  int referenced;
 
   int nformals;
   int nactuals;
@@ -64,6 +66,18 @@ struct inst {
   struct bytecode* compiled;
 
   int bytecode_pos; // position just after this insn
+  unsigned int hidden:1;
+
+  // if this instruction is copied,
+  // the info about the copy is saved here
+  // this allows for post processing to rebind targets or such
+  // the context is used as versioning to identify 
+  // instructions which were copied whithin a particular context
+  // POLICY: assign (don't free either target or dest!)
+  struct {
+    void* context;
+    inst* dest;
+  } copy;
 };
 
 static inst* inst_new(opcode op) {
@@ -73,25 +87,80 @@ static inst* inst_new(opcode op) {
   i->bytecode_pos = -1;
   i->bound_by = 0;
   i->symbol = 0;
+  i->any_unbound = 0;
+  i->referenced = 0;
   i->nformals = -1;
   i->nactuals = -1;
   i->subfn = gen_noop();
   i->arglist = gen_noop();
   i->source = UNKNOWN_LOCATION;
   i->locfile = 0;
+  i->hidden = 0;
+  i->copy.context = 0;
+  i->copy.dest = 0;
   return i;
 }
 
-static void inst_free(struct inst* i) {
-  jv_mem_free(i->symbol);
-  block_free(i->subfn);
-  block_free(i->arglist);
-  if (i->locfile)
-    locfile_free(i->locfile);
-  if (opcode_describe(i->op)->flags & OP_HAS_CONSTANT) {
-    jv_free(i->imm.constant);
+static void inst_dispose(struct inst* i) {
+  jv_mem_free(i->symbol); i->symbol = 0;
+  block_free(i->subfn); i->subfn = gen_noop();
+  block_free(i->arglist); i->arglist = gen_noop();
+  if (i->locfile) {
+    locfile_free(i->locfile); i->locfile = 0;
   }
+  if (opcode_describe(i->op)->flags & OP_HAS_CONSTANT) {
+    jv_free(i->imm.constant); i->imm.constant = jv_invalid();
+  }
+}
+
+static void inst_free(struct inst* i) {
+  inst_dispose(i);
   jv_mem_free(i);
+}
+
+static block block_copy(block b, void* copy_context);
+
+static inst* inst_copy_to(struct inst* o, struct inst* i, void* copy_context) {
+  memcpy(o, i, sizeof(inst));
+
+  if (opcode_describe(i->op)->flags & OP_HAS_CONSTANT) {
+    o->imm.constant = jv_copy(i->imm.constant);
+  }
+  if(i->locfile) {
+    o->locfile = locfile_retain(i->locfile);
+  }
+  o->arglist = block_copy(i->arglist, copy_context);
+  o->subfn = block_copy(i->subfn, copy_context);
+  o->symbol =  i->symbol ? jv_mem_strdup(i->symbol) : 0;
+
+  // thank me later :)
+  i->copy.context = copy_context;
+  i->copy.dest = o;
+
+  return o;
+}
+
+static block block_copy(block b, void * copy_context) {
+  block bo = {0,0};
+  struct inst *lasto = 0;
+  // this covers the case when block has last instruction with a non-zero next element
+  for (struct inst * i = b.first; i && (i->prev != b.last); i = i->next) {
+    struct inst * o = jv_mem_alloc(sizeof(inst));
+    inst_copy_to(o, i, copy_context);
+    o->prev = lasto;
+    if(lasto) {
+      lasto->next = o;
+    } else {
+      bo.first = o;
+      bo.first->prev = 0;
+    }
+    lasto = o;
+  }
+  if(lasto) {
+    lasto->next = 0;
+  }
+  bo.last = lasto;
+  return bo;
 }
 
 static block inst_block(inst* i) {
@@ -117,6 +186,18 @@ static inst* block_take(block* b) {
   return i;
 }
 
+block block_take_block(block *b) {
+  return inst_block(block_take(b));
+}
+
+block block_hide(block b) {
+  for (inst* i = b.first; i; i = i->next) {
+    if (i->op == CLOSURE_CREATE_C && !i->imm.cfunc->exported)
+      i->hidden = 1;
+  }
+  return b;
+}
+
 block gen_location(location loc, struct locfile* l, block b) {
   for (inst* i = b.first; i; i = i->next) {
     if (i->source.start == UNKNOWN_LOCATION.start &&
@@ -137,17 +218,25 @@ int block_is_noop(block b) {
   return (b.first == 0 && b.last == 0);
 }
 
+block gen_marker(opcode op) {
+  assert(opcode_describe(op)->length == 0);
+  return inst_block(inst_new(op));
+}
+
 block gen_op_simple(opcode op) {
   assert(opcode_describe(op)->length == 1);
   return inst_block(inst_new(op));
 }
 
-
-block gen_const(jv constant) {
-  assert(opcode_describe(LOADK)->flags & OP_HAS_CONSTANT);
-  inst* i = inst_new(LOADK);
+block gen_op_const(opcode op, jv constant) {
+  assert(opcode_describe(op)->flags & OP_HAS_CONSTANT);
+  inst* i = inst_new(op);
   i->imm.constant = constant;
   return inst_block(i);
+}
+
+block gen_const(jv constant) {
+  return gen_op_const(LOADK, constant);
 }
 
 block gen_const_global(jv constant, const char *name) {
@@ -156,6 +245,7 @@ block gen_const_global(jv constant, const char *name) {
   inst* i = inst_new(STORE_GLOBAL);
   i->imm.constant = constant;
   i->symbol = strdup(name);
+  i->any_unbound = 0;
   return inst_block(i);
 }
 
@@ -211,19 +301,22 @@ block gen_op_unbound(opcode op, const char* name) {
   assert(opcode_describe(op)->flags & OP_HAS_BINDING);
   inst* i = inst_new(op);
   i->symbol = strdup(name);
+  i->any_unbound = 1;
   return inst_block(i);
 }
 
 block gen_op_var_fresh(opcode op, const char* name) {
   assert(opcode_describe(op)->flags & OP_HAS_VARIABLE);
-  return block_bind(gen_op_unbound(op, name),
-                    gen_noop(), OP_HAS_VARIABLE);
+  block b = gen_op_unbound(op, name);
+  b.first->bound_by = b.first;
+  return b;
 }
 
 block gen_op_bound(opcode op, block binder) {
   assert(block_is_single(binder));
   block b = gen_op_unbound(op, binder.first->symbol);
   b.first->bound_by = binder.first;
+  b.first->any_unbound = 0;
   return b;
 }
 
@@ -282,18 +375,6 @@ int block_has_only_binders(block binders, int bindflags) {
   return 1;
 }
 
-// Count a binder's (function) formal params
-static int block_count_formals(block b) {
-  int args = 0;
-  if (b.first->op == CLOSURE_CREATE_C)
-    return b.first->imm.cfunc->nargs - 1;
-  for (inst* i = b.first->arglist.first; i; i = i->next) {
-    assert(i->op == CLOSURE_PARAM);
-    args++;
-  }
-  return args;
-}
-
 // Count a call site's actual params
 static int block_count_actuals(block b) {
   int args = 0;
@@ -310,21 +391,7 @@ static int block_count_actuals(block b) {
   return args;
 }
 
-static int block_count_refs(block binder, block body) {
-  int nrefs = 0;
-  for (inst* i = body.first; i; i = i->next) {
-    if (i != binder.first && i->bound_by == binder.first) {
-      nrefs++;
-    }
-    // counting recurses into closures
-    nrefs += block_count_refs(binder, i->subfn);
-    // counting recurses into argument list
-    nrefs += block_count_refs(binder, i->arglist);
-  }
-  return nrefs;
-}
-
-static int block_bind_subblock(block binder, block body, int bindflags, int break_distance) {
+static int block_bind_subblock_inner(int* any_unbound, block binder, block body, int bindflags, int break_distance) {
   assert(block_is_single(binder));
   assert((opcode_describe(binder.first->op)->flags & bindflags) == (bindflags & ~OP_BIND_WILDCARD));
   assert(binder.first->symbol);
@@ -332,20 +399,20 @@ static int block_bind_subblock(block binder, block body, int bindflags, int brea
   assert(break_distance >= 0);
 
   binder.first->bound_by = binder.first;
-  if (binder.first->nformals == -1)
-    binder.first->nformals = block_count_formals(binder);
   int nrefs = 0;
   for (inst* i = body.first; i; i = i->next) {
+    if (i->any_unbound == 0)
+      continue;
+
     int flags = opcode_describe(i->op)->flags;
     if ((flags & bindflags) == (bindflags & ~OP_BIND_WILDCARD) && i->bound_by == 0 &&
+        !binder.first->hidden &&
         (!strcmp(i->symbol, binder.first->symbol) ||
          // Check for break/break2/break3; see parser.y
          ((bindflags & OP_BIND_WILDCARD) && i->symbol[0] == '*' &&
           break_distance <= 3 && (i->symbol[1] == '1' + break_distance) &&
           i->symbol[2] == '\0'))) {
       // bind this instruction
-      if (i->op == CALL_JQ && i->nactuals == -1)
-        i->nactuals = block_count_actuals(i->arglist);
       if (i->nactuals == -1 || i->nactuals == binder.first->nformals) {
         i->bound_by = binder.first;
         nrefs++;
@@ -357,12 +424,23 @@ static int block_bind_subblock(block binder, block body, int bindflags, int brea
       // a break whenever we come across a STOREV of *anonlabel...
       break_distance++;
     }
+
+    i->any_unbound = (i->symbol && !i->bound_by);
+
     // binding recurses into closures
-    nrefs += block_bind_subblock(binder, i->subfn, bindflags, break_distance);
+    nrefs += block_bind_subblock_inner(&i->any_unbound, binder, i->subfn, bindflags, break_distance);
     // binding recurses into argument list
-    nrefs += block_bind_subblock(binder, i->arglist, bindflags, break_distance);
+    nrefs += block_bind_subblock_inner(&i->any_unbound, binder, i->arglist, bindflags, break_distance);
+
+    if (i->any_unbound)
+      *any_unbound = 1;
   }
   return nrefs;
+}
+
+static int block_bind_subblock(block binder, block body, int bindflags, int break_distance) {
+  int any_unbound;
+  return block_bind_subblock_inner(&any_unbound, binder, body, bindflags, break_distance);
 }
 
 static int block_bind_each(block binder, block body, int bindflags) {
@@ -375,7 +453,7 @@ static int block_bind_each(block binder, block body, int bindflags) {
   return nrefs;
 }
 
-block block_bind(block binder, block body, int bindflags) {
+static block block_bind(block binder, block body, int bindflags) {
   block_bind_each(binder, body, bindflags);
   return block_join(binder, body);
 }
@@ -392,7 +470,7 @@ block block_bind_library(block binder, block body, int bindflags, const char *li
     matchlen += 2;
   }
   assert(block_has_only_binders(binder, bindflags));
-  for (inst *curr = binder.first; curr; curr = curr->next) {
+  for (inst *curr = binder.last; curr; curr = curr->prev) {
     int bindflags2 = bindflags;
     char* cname = curr->symbol;
     char* tname = jv_mem_alloc(strlen(curr->symbol)+matchlen+1);
@@ -413,81 +491,210 @@ block block_bind_library(block binder, block body, int bindflags, const char *li
   return body; // We don't return a join because we don't want those sticking around...
 }
 
-// Bind binder to body and throw away any defs in binder not referenced
-// (directly or indirectly) from body.
+static inst* block_take_last(block* b) {
+  inst* i = b->last;
+  if (i == 0)
+    return 0;
+  if (i->prev) {
+    i->prev->next = i->next;
+    b->last = i->prev;
+    i->prev = 0;
+  } else {
+    b->first = 0;
+    b->last = 0;
+  }
+  return i;
+}
+
+block block_inline(block inlines, block body) {
+
+  inst *i;
+  inst *b;
+  block result = body;
+
+  for (b = body.first; b; b = b->next) {
+    if (b->any_unbound == 0) {
+      continue;
+    }
+
+    for (i = inlines.first; i; i = i->next) {
+
+      if (b->op == CALL_JQ && !b->bound_by && strcmp(b->symbol, i->symbol) == 0 &&
+          b->nactuals == i->nformals) {
+
+            void* ctx = (void*)random();
+
+            // save the call's arglist for the mapping below
+            block call_arglist = b->arglist;
+            // avoid freeing the arglist in the dispose call below
+            b->arglist = gen_noop();
+            // save the prev and next
+            inst* prev = b->prev;
+            inst* next = b->next;
+
+            // first, copy all instructions but the last one
+            // in case it's a single instruction block then just noop
+            block subfun_no_last = { 0, 0 };
+            if (!block_is_single(i->subfn)){
+              subfun_no_last.first = i->subfn.first;
+              subfun_no_last.last = i->subfn.last->prev;
+            }
+            block copy = block_copy(subfun_no_last, ctx);
+
+            // now, reuse the current call instruction
+            // as the holder for the last instruction in the new inlined body
+            // this handles the case if any other instruction in the code
+            // had this call as the branch target.
+            // searching for such instruction would mean 
+            // that we needed to scan full code (every time) and we don't want it
+            inst_dispose(b);
+            inst_copy_to(b, i->subfn.last, ctx);
+            b->prev = 0; // for a valid inst block
+            block_append(&copy, inst_block(b));
+
+            // now, do the parameter mapping and target remapping
+            // CALL_JQ already has all its arguments prepared and wrapped in 
+            // CLOSURE_CREATE or like, so all we need to do
+            // is to find instructions of the inlined function bound by params
+            // and rebind them to the corresponding args from the arglist
+
+            for(inst* ii = copy.first; ii; ii = ii->next) {
+              if (opcode_describe(ii->op)->flags & OP_HAS_BRANCH) {
+                assert(ii->imm.target && "branching instruction without a target");
+                // in case the instruction had a branch to one of the other
+                // copied instructions, we need to remap it
+                if (ii->imm.target->copy.context == ctx) {
+                  // context matches, means we've just copied it
+                  // just remap it to the copy dest
+                  ii->imm.target = ii->imm.target->copy.dest;
+                }
+              }
+
+              if (ii->bound_by && ii->bound_by->op == CLOSURE_PARAM) {
+                // find the matching param and the corresponding argument
+                int index = 0;
+                inst *arg = call_arglist.first;
+                inst *par = i->arglist.first;
+                while(index < i->nformals && par != ii->bound_by && par && arg) {
+                  par = par->next;
+                  arg = arg->next;
+                  index ++;
+                }
+                assert(index < i->nformals && par && arg && "couldn't identify matching param");
+
+                // the magic happens here
+                ii->bound_by = arg;
+              }
+            }
+
+            // now, copy the arglist from the CALL_JQ instruction
+            // to have the subfunctions stay 
+            copy = block_join(call_arglist, copy);
+
+            // inject the inlined code 
+            // instead of the call instruction
+            copy.first->prev = prev;
+            copy.last->next = next;
+
+            if(prev) {
+              prev->next = copy.first;
+            } else {
+              // this used to be the first instruction in body
+              // we have to update the result.first pointer now
+              result.first = copy.first;
+            }
+
+            // we've reused the call instruction as the last one
+            // so the next is already pointing to the correct inst.
+
+            // we've reused the call instruction
+            // so no need to free anything
+      } else {
+        b->arglist = block_inline(inlines, b->arglist);
+        b->subfn = block_inline(inlines, b->subfn);
+      }
+    }
+  }
+  return result;
+}
+
+// Binds a sequence of binders, which *must not* alrady be bound to each other,
+// to body, throwing away unreferenced defs
 block block_bind_referenced(block binder, block body, int bindflags) {
   assert(block_has_only_binders(binder, bindflags));
   bindflags |= OP_HAS_BINDING;
-  block refd = gen_noop();
-  block unrefd = gen_noop();
-  int nrefs;
-  for (int last_kept = 0, kept = 0; ; ) {
-    for (inst* curr; (curr = block_take(&binder));) {
-      block b = inst_block(curr);
-      nrefs = block_bind_each(b, body, bindflags);
-      // Check if this binder is referenced from any of the ones we
-      // already know are referenced by body.
-      nrefs += block_count_refs(b, refd);
-      nrefs += block_count_refs(b, body);
-      if (nrefs) {
-        refd = BLOCK(refd, b);
-        kept++;
-      } else {
-        unrefd = BLOCK(unrefd, b);
-      }
+
+  inst* curr;
+  while ((curr = block_take_last(&binder))) {
+    block b = inst_block(curr);
+    if (block_bind_subblock(b, body, bindflags, 0) == 0) {
+      block_free(b);
+    } else {
+      body = BLOCK(b, body);
     }
-    if (kept == last_kept)
-      break;
-    last_kept = kept;
-    binder = unrefd;
-    unrefd = gen_noop();
   }
-  block_free(unrefd);
-  return block_join(refd, body);
+  return body;
+}
+
+block block_bind_self(block binder, int bindflags) {
+  assert(block_has_only_binders(binder, bindflags));
+  bindflags |= OP_HAS_BINDING;
+  block body = gen_noop();
+
+  inst* curr;
+  while ((curr = block_take_last(&binder))) {
+    block b = inst_block(curr);
+    block_bind_subblock(b, body, bindflags, 0);
+    body = BLOCK(b, body);
+  }
+  return body;
+}
+
+static void block_mark_referenced(block body) {
+  int saw_top = 0;
+  for (inst* i = body.last; i; i = i->prev) {
+    if (saw_top && i->bound_by == i && !i->referenced)
+      continue;
+    if (i->op == TOP) {
+      saw_top = 1;
+    }
+    if (i->bound_by) {
+      i->bound_by->referenced = 1;
+    }
+
+    block_mark_referenced(i->arglist);
+    block_mark_referenced(i->subfn);
+  }
 }
 
 block block_drop_unreferenced(block body) {
-  inst* curr;
+  block_mark_referenced(body);
+
   block refd = gen_noop();
-  block unrefd = gen_noop();
-  int drop;
-  do {
-    drop = 0;
-    while ((curr = block_take(&body)) && curr->op != TOP) {
-      block b = inst_block(curr);
-      if (block_count_refs(b,refd) + block_count_refs(b,body) == 0) {
-        unrefd = BLOCK(unrefd, b);
-        drop++;
-      } else {
-        refd = BLOCK(refd, b);
-      }
+  inst* curr;
+  while ((curr = block_take(&body))) {
+    if (curr->bound_by == curr && !curr->referenced) {
+      inst_free(curr);
+    } else {
+      refd = BLOCK(refd, inst_block(curr));
     }
-    if (curr && curr->op == TOP) {
-      body = BLOCK(inst_block(curr),body);
-    }
-    body = BLOCK(refd, body);
-    refd = gen_noop();
-  } while (drop != 0);
-  block_free(unrefd);
-  return body;
+  }
+  return refd;
 }
 
 jv block_take_imports(block* body) {
   jv imports = jv_array();
 
-  inst* top = NULL;
-  if (body->first && body->first->op == TOP) {
-    top = block_take(body);
-  }
+  /* Parser should never generate TOP before imports */
+  assert(!(body->first && body->first->op == TOP && body->first->next &&
+        (body->first->next->op == MODULEMETA || body->first->next->op == DEPS)));
+
   while (body->first && (body->first->op == MODULEMETA || body->first->op == DEPS)) {
     inst* dep = block_take(body);
     if (dep->op == DEPS) {
       imports = jv_array_append(imports, jv_copy(dep->imm.constant));
     }
     inst_free(dep);
-  }
-  if (top) {
-    *body = block_join(inst_block(top),*body);
   }
   return imports;
 }
@@ -541,19 +748,33 @@ block gen_import_meta(block import, block metadata) {
 
 block gen_function(const char* name, block formals, block body) {
   inst* i = inst_new(CLOSURE_CREATE);
+  int nformals = 0;
   for (inst* i = formals.last; i; i = i->prev) {
+    nformals++;
+    i->nformals = 0;
     if (i->op == CLOSURE_PARAM_REGULAR) {
       i->op = CLOSURE_PARAM;
       body = gen_var_binding(gen_call(i->symbol, gen_noop()), i->symbol, body);
+    } else if (i->op == CLOSURE_PARAM_COEXPR) {
+      i->op = CLOSURE_PARAM;
+      block coexp = gen_function(i->symbol, gen_noop(), BLOCK(gen_op_unbound(LOADV,i->symbol), gen_call("fhread", gen_noop())));
+      block_bind_subblock(coexp, body, OP_IS_CALL_PSEUDO | OP_HAS_BINDING, 0);
+      body = gen_var_binding(gen_call("coexp", gen_lambda(gen_call(i->symbol, gen_noop()))), i->symbol, BLOCK(coexp, body));
     }
     block_bind_subblock(inst_block(i), body, OP_IS_CALL_PSEUDO | OP_HAS_BINDING, 0);
   }
   i->subfn = body;
   i->symbol = strdup(name);
+  i->any_unbound = -1;
+  i->nformals = nformals;
   i->arglist = formals;
   block b = inst_block(i);
   block_bind_subblock(b, b, OP_IS_CALL_PSEUDO | OP_HAS_BINDING, 0);
   return b;
+}
+
+block gen_param_coexpr(const char* name) {
+  return gen_op_unbound(CLOSURE_PARAM_COEXPR, name);
 }
 
 block gen_param_regular(const char* name) {
@@ -571,6 +792,7 @@ block gen_lambda(block body) {
 block gen_call(const char* name, block args) {
   block b = gen_op_unbound(CALL_JQ, name);
   b.first->arglist = args;
+  b.first->nactuals = block_count_actuals(b.first->arglist);
   return b;
 }
 
@@ -720,7 +942,7 @@ block gen_collect(block expr) {
   block c = BLOCK(gen_op_simple(DUP), gen_const(jv_array()), array_var);
 
   block tail = BLOCK(gen_op_bound(APPEND, array_var),
-                     gen_op_simple(BACKTRACK));
+                     gen_op_simple(BACKTRACK_0));
 
   return BLOCK(c,
                gen_op_target(FORK, tail),
@@ -733,96 +955,150 @@ static block bind_matcher(block matcher, block body) {
   // cannot call block_bind(matcher, body) because that requires
   // block_has_only_binders(matcher), which is not true here as matchers
   // may also contain code to extract the correct elements
-  for (inst* i = matcher.first; i; i = i->next) {
-    if ((i->op == STOREV || i->op == STOREVN) && !i->bound_by)
-      block_bind_subblock(inst_block(i), body, OP_HAS_VARIABLE, 0);
+
+  block both = BLOCK(matcher, body);
+  for (inst* i = matcher.first; i && i->prev != matcher.last; i = i->next) {
+    if ((i->op == STOREV) && !i->bound_by)
+      block_bind_subblock(inst_block(i), both, OP_HAS_VARIABLE, 0);
   }
-  return BLOCK(matcher, body);
+  return both;
 }
 
-
-// Extract destructuring var names from the block
-// *vars should be a jv_object (for set semantics)
-static void block_get_unbound_vars(block b, jv *vars) {
-  assert(vars != NULL);
-  assert(jv_get_kind(*vars) == JV_KIND_OBJECT);
-  for (inst* i = b.first; i; i = i->next) {
-    if (i->subfn.first) {
-      block_get_unbound_vars(i->subfn, vars);
-      continue;
-    }
-    if ((i->op == STOREV || i->op == STOREVN) && i->bound_by == NULL) {
-      *vars = jv_object_set(*vars, jv_string(i->symbol), jv_true());
-    }
-  }
-}
-
-/* Build wrappers around destructuring matchers so that we can chain them
- * when we have errors.  The approach is as follows:
- * DESTRUCTURE_ALT NEXT_MATCHER (unless last matcher)
- * existing_matcher_block
- * JUMP BODY
+/*
+ * Generic ateration matcher processing
+ * 
+ * MULTIPLE PATTERNS (matchers)
+ * 
+ * Given the original code as 
+ * <var> as <matchers> | <body>
+ * 
+ * the layout of the resulting code will be:
+ * 
+ * <var> <call destructure_lambda>
+ * 
+ * where destructure_lambda will look like this:
+ * 
+ * DESTRUCTURE_BEGIN (ix_alt)
+ * JUMP matcher1 JUMP matcher2 ... JUMP matcherN 
+ * <matcher1> JUMP tail <matcher2> JUMP tail ... <matcher3>
+ * tail: STOREV *ix_alt
+ * <post>
+ * RET_JQ
+ * 
+ * The reasoning for this layout is that having a separate frame
+ * with destructure definitions allows for an efficient way to
+ * iterate over all local vars defined by the matchers
+ * The only thing is that we should somehow know the total number
+ * of the defined variables to nullify them.
+ * This is why <ix_alt> variable is defined last: it will receive
+ * a local var id immediately after the last var in the matchers
+ * providing us with the upper bound.
+ * 
+ * 
+ * SIGNLE PATTERN (matcher)
+ * 
+ * for the trivial case of a single matcher no function is defiend
+ * and no jumps installed.
+ * 
  */
-static block bind_alternation_matchers(block matchers, block body) {
-  block preamble = {0};
-  block altmatchers = {0};
-  block mb = {0};
-  block final_matcher = matchers;
+static block gen_alternation_matchers(block source, block matchers, block body) {
+  if (block_is_single(matchers)) {
+    // the TRIVIAL case of a single matcher
+    // avoid the complexities
 
-  // Pass through the matchers to find all destructured names.
-  while (final_matcher.first && final_matcher.first->op == DESTRUCTURE_ALT) {
-    block_append(&altmatchers, inst_block(block_take(&final_matcher)));
+    block matcher = matchers;
+
+    if(matchers.first->op == DESTRUCTURE_ALT) {
+      matcher = matchers.first->subfn;
+      matchers.first->subfn = gen_noop();
+      block_free(matchers);
+    }
+
+    return BLOCK(
+      gen_op_simple(DUP), 
+      source, 
+      bind_matcher(matcher, body)
+    );
+  }
+    
+    
+  // NONTRIVIAL case of multiple alternatie matchers
+
+  // this instruction will never execute
+  // it's used for two pruposes:
+  //  1. define a storage place for the next matcher index
+  //  2. record the next var index in this frame to scope all vars defined in matchers
+  // the second point above makes it possible to implement efficient nulling of the vars.
+  block alt_ix = gen_op_var_fresh(STOREV, "*alt_ix");
+
+  block jump_table_tail = gen_noop();
+  block actual_matchers = gen_noop();
+
+  for (inst* alt_m = matchers.first; alt_m; alt_m = alt_m->next) {
+    assert(alt_m->op == DESTRUCTURE_ALT);
+
+    // overtake the matcher from the 
+    // DESTRUCTURE_ALT instruction so that it can be freed
+    block matcher = alt_m->subfn;
+    alt_m->subfn = gen_noop();
+
+    // jump over the alt_ix STOREV
+    block_append(&matcher, gen_op_target(JUMP, alt_ix));
+    if (alt_m->next) {
+      // since it's not the last matcher we need to add to the jump table
+      // (this jump is actually pointing to the next matcher)
+      block_append(&jump_table_tail, gen_op_target(JUMP, matcher));
+    }
+    block_append(&actual_matchers, matcher);
   }
 
-  // We don't have any alternations here, so we can use the simplest case.
-  if (altmatchers.first == NULL) {
-    return bind_matcher(final_matcher, body);
-  }
+  block_free(matchers);
 
-  // Collect var names
-  jv all_vars = jv_object();
-  block_get_unbound_vars(altmatchers, &all_vars);
-  block_get_unbound_vars(final_matcher, &all_vars);
+  // pointing to the end of the table - i.e. the first matcher
+  block jump_table_head = gen_op_target(JUMP, jump_table_tail);
 
-  // We need a preamble of STOREVs to which to bind the matchers and the body.
-  jv_object_keys_foreach(all_vars, key) {
-    preamble = BLOCK(preamble,
-                     gen_op_simple(DUP),
-                     gen_const(jv_null()),
-                     gen_op_unbound(STOREV, jv_string_value(key)));
-    jv_free(key);
-  }
-  jv_free(all_vars);
+  // we need to pass the source as a closure to the function
+  // because otherwise we will have issues of dealing with two inputs:
+  // input 1: the original dot
+  // input 2: the source for the matchers (in case the source is outside of the func call)
 
-  // Now we build each matcher in turn
-  for (inst *i = altmatchers.first; i; i = i->next) {
-    block submatcher = i->subfn;
+  block destructure_flow = gen_function("@destructure_flow", gen_param("*source"), BLOCK(
+    gen_op_simple(DUP),
+    gen_call("*source", gen_noop()),
+    gen_op_bound(DESTRUCTURE_BEGIN, alt_ix),
+    jump_table_head,
+    jump_table_tail,
+    bind_matcher(
+      BLOCK(
+        actual_matchers,
+        alt_ix
+      ),
+      body
+    )
+  ));
 
-    // If we're successful, jump to the end of the matchers
-    submatcher = BLOCK(submatcher, gen_op_target(JUMP, final_matcher));
+  block source_closure = gen_function("@source", gen_noop(), source);
+  // this call is receivig the source as a parameter
+  block flow_call = gen_call(destructure_flow.first->symbol, source_closure);
+  flow_call.first->bound_by = destructure_flow.first;
+  flow_call.first->any_unbound = 0;
 
-    // DESTRUCTURE_ALT to the end of this submatcher so we can skip to the next one on error
-    mb = BLOCK(mb, gen_op_target(DESTRUCTURE_ALT, submatcher), submatcher);
-
-    // We're done with this inst and we don't want it anymore
-    // But we can't let it free the submatcher block.
-    i->subfn.first = i->subfn.last = NULL;
-  }
-  // We're done with these insts now.
-  block_free(altmatchers);
-
-  return bind_matcher(preamble, BLOCK(mb, final_matcher, body));
+  return BLOCK(
+    flow_call,
+    destructure_flow
+  );
 }
 
 block gen_reduce(block source, block matcher, block init, block body) {
   block res_var = gen_op_var_fresh(STOREV, "reduce");
-  block loop = BLOCK(gen_op_simple(DUPN),
-                     source,
-                     bind_alternation_matchers(matcher,
+  block loop = BLOCK(gen_op_simple(DUPN), gen_op_simple(POP),
+                     gen_alternation_matchers(
+                                  source,
+                                  matcher,
                                   BLOCK(gen_op_bound(LOADVN, res_var),
                                         body,
                                         gen_op_bound(STOREV, res_var))),
-                     gen_op_simple(BACKTRACK));
+                     gen_op_simple(BACKTRACK_0));
   return BLOCK(gen_op_simple(DUP),
                init,
                res_var,
@@ -834,33 +1110,34 @@ block gen_reduce(block source, block matcher, block init, block body) {
 block gen_foreach(block source, block matcher, block init, block update, block extract) {
   block output = gen_op_targetlater(JUMP);
   block state_var = gen_op_var_fresh(STOREV, "foreach");
-  block loop = BLOCK(gen_op_simple(DUPN),
-                     // get a value from the source expression:
-                     source,
+  block loop = BLOCK(gen_op_simple(DUPN), gen_op_simple(POP),
                      // destructure the value into variable(s) for all the code
                      // in the body to see
-                     bind_alternation_matchers(matcher,
-                                  // load the loop state variable
-                                  BLOCK(gen_op_bound(LOADVN, state_var),
-                                        // generate updated state
-                                        update,
-                                        // save the updated state for value extraction
-                                        gen_op_simple(DUP),
-                                        // save new state
-                                        gen_op_bound(STOREV, state_var),
-                                        // extract an output...
-                                        extract,
-                                        // ...and output it by jumping
-                                        // past the BACKTRACK that comes
-                                        // right after the loop body,
-                                        // which in turn is there
-                                        // because...
-                                        //
-                                        // (Incidentally, extract can also
-                                        // backtrack, e.g., if it calls
-                                        // empty, in which case we don't
-                                        // get here.)
-                                        output)));
+                     gen_alternation_matchers(
+                        // get a value from the source expression:
+                        source,
+                        matcher,
+                        // load the loop state variable
+                        BLOCK(gen_op_bound(LOADVN, state_var),
+                              // generate updated state
+                              update,
+                              // save the updated state for value extraction
+                              gen_op_simple(DUP),
+                              // save new state
+                              gen_op_bound(STOREV, state_var),
+                              // extract an output...
+                              extract,
+                              // ...and output it by jumping
+                              // past the BACKTRACK that comes
+                              // right after the loop body,
+                              // which in turn is there
+                              // because...
+                              //
+                              // (Incidentally, extract can also
+                              // backtrack, e.g., if it calls
+                              // empty, in which case we don't
+                              // get here.)
+                              output)));
   block foreach = BLOCK(gen_op_simple(DUP),
                         init,
                         state_var,
@@ -869,9 +1146,35 @@ block gen_foreach(block source, block matcher, block init, block update, block e
                         // ...at this point `foreach`'s original input
                         // will be on top of the stack, and we don't
                         // want to output it, so we backtrack.
-                        gen_op_simple(BACKTRACK));
+                        gen_op_simple(BACKTRACK_0));
   inst_set_target(output, foreach); // make that JUMP go bast the BACKTRACK at the end of the loop
   return foreach;
+}
+
+block gen_coexpression_with_param_name(const char* param) {
+  block cobody = BLOCK(gen_op_simple(START),
+                       gen_call(param, gen_noop()),
+                       gen_op_simple(TAIL_OUT));
+  block cocreate = gen_op_target(COCREATE, cobody);
+  return BLOCK(cocreate, cobody);
+}
+
+block gen_protect_with_param_name(const char* param) {
+  // PROTECT will install a protect forkpoint
+  // that will fire on any kind of unwind
+  // when it does fire, the handler will be run 
+  // with an input of {.raising=<bool> [.error=<error>]}
+
+  // Before running the handler, another protect forkpoint will be installed.
+  // This time, the forkpoint will be needed to re-send the backtracking event
+  // which has triggered the handler run.
+  
+  // If the handler raises or backtracks the protect will still re-send
+  // the original backtracking signal. 
+  block handler = BLOCK(gen_call(param, gen_noop()),
+                        gen_op_simple(BACKTRACK_0));
+  block protect = gen_op_target(PROTECT, handler);
+  return BLOCK(protect, handler);
 }
 
 block gen_definedor(block a, block b) {
@@ -880,7 +1183,7 @@ block gen_definedor(block a, block b) {
   block init = BLOCK(gen_op_simple(DUP), gen_const(jv_false()), found_var);
 
   // if found, backtrack. Otherwise execute b
-  block backtrack = gen_op_simple(BACKTRACK);
+  block backtrack = gen_op_simple(BACKTRACK_0);
   block tail = BLOCK(gen_op_simple(DUP),
                      gen_op_bound(LOADV, found_var),
                      gen_op_target(JUMP_F, backtrack),
@@ -889,7 +1192,7 @@ block gen_definedor(block a, block b) {
                      b);
 
   // try again
-  block if_notfound = gen_op_simple(BACKTRACK);
+  block if_notfound = gen_op_simple(BACKTRACK_0);
 
   // found := true, produce result
   block if_found = BLOCK(gen_op_simple(DUP),
@@ -946,11 +1249,6 @@ block gen_or(block a, block b) {
 }
 
 block gen_destructure_alt(block matcher) {
-  for (inst *i = matcher.first; i; i = i->next) {
-    if (i->op == STOREV) {
-      i->op = STOREVN;
-    }
-  }
   inst* i = inst_new(DESTRUCTURE_ALT);
   i->subfn = matcher;
   return inst_block(i);
@@ -993,16 +1291,20 @@ block gen_object_matcher(block name, block curr) {
 block gen_destructure(block var, block matchers, block body) {
   // var bindings can be added after coding the program; leave the TOP first.
   block top = gen_noop();
-  if (body.first && body.first->op == TOP)
+  if (body.first && body.first->op == TOP) {
     top = inst_block(block_take(&body));
-
-  if (matchers.first && matchers.first->op == DESTRUCTURE_ALT) {
-    block_append(&var, gen_op_simple(DUP));
-  } else {
-    top = BLOCK(top, gen_op_simple(DUP));
   }
 
-  return BLOCK(top, gen_subexp(var), gen_op_simple(POP), bind_alternation_matchers(matchers, body));
+  return BLOCK(
+    top, 
+    gen_alternation_matchers(
+      BLOCK(
+        gen_subexp(var),                           
+        gen_op_simple(POP)  // needed because of the subexp
+      ),
+      matchers, 
+      body)
+  );
 }
 
 // Like gen_var_binding(), but bind `break`'s wildcard unbound variable
@@ -1018,70 +1320,58 @@ block gen_cond(block cond, block iftrue, block iffalse) {
                               BLOCK(gen_op_simple(POP), iffalse)));
 }
 
-block gen_try_handler(block handler) {
-  // Quite a pain just to hide jq's internal errors.
-  return gen_cond(// `if type=="object" and .__jq
-                  gen_and(gen_call("_equal",
-                                   BLOCK(gen_lambda(gen_const(jv_string("object"))),
-                                         gen_lambda(gen_noop()))),
-                          BLOCK(gen_subexp(gen_const(jv_string("__jq"))),
-                                gen_noop(),
-                                gen_op_simple(INDEX))),
-                  // `then error`
-                  gen_call("error", gen_noop()),
-                  // `else HANDLER end`
-                  handler);
-}
-
 block gen_try(block exp, block handler) {
   /*
-   * Produce something like:
-   *  FORK_OPT <address of handler>
-   *  <exp>
-   *  JUMP <end of handler>
-   *  <handler>
+   * Produce:
    *
-   * If this is not an internal try/catch, then catch and re-raise
-   * internal errors to prevent them from leaking.
+   *            TRY_BEGIN @handler
+   *            <exp>
+   *            TRY_END @rest
+   *  handler:  <handler>
+   *  rest:     <rest>
    *
-   * The handler will only execute if we backtrack to the FORK_OPT with
-   * an error (exception).  If <exp> produces no value then FORK_OPT
-   * will backtrack (propagate the `empty`, as it were.  If <exp>
-   * produces a value then we'll execute whatever bytecode follows this
-   * sequence.
+   * If <exp> backtracks then TRY_BEGIN will backtrack.
+   *
+   * If <exp> produces a value then we'll execute whatever bytecode follows
+   * this sequence (<rest). If that code raises an exception, then TRY_END will
+   * catch it and signal to TRY_BEGIN, which will re-raise the exception
+   * (see jq_next()). the address of the handler will be used as the signalling tag,
+   * as it is known to both TRY_BEGIN (branch dest) and TRY_END (next inst)
+   *
+   * If <exp> raises then the TRY_BEGIN will see a non-wrapped exception and
+   * will jump to the handler (note the TRY_END will not execute in this case),
+   * and if the handler produces any values, then we'll execute whatever
+   * bytecode follows this sequence.  Note that TRY_END will not execute in
+   * this case, so if the handler raises an exception, or code past the handler
+   * raises an exception, then that exception won't be wrapped and re-raised,
+   * and the TRY_BEGIN will not catch it because it does not stack_save() when
+   * it branches to the handler.
    */
-  if (!handler.first && !handler.last)
-    // A hack to deal with `.` as the handler; we could use a real NOOP here
-    handler = BLOCK(gen_op_simple(DUP), gen_op_simple(POP), handler);
-  exp = BLOCK(exp, gen_op_target(JUMP, handler));
-  return BLOCK(gen_op_target(FORK_OPT, exp), exp, handler);
+
+  if (block_is_noop(handler))
+    handler = gen_marker(TARGET_MARKER);
+
+  block end = gen_op_target(TRY_END, handler);
+
+  return BLOCK(gen_op_target(TRY_BEGIN, end), 
+               exp, end, handler);
 }
 
 block gen_label(const char *label, block exp) {
-  block cond = gen_call("_equal",
-                        BLOCK(gen_lambda(gen_noop()),
-                              gen_lambda(gen_op_unbound(LOADV, label))));
-  return gen_wildvar_binding(gen_op_simple(GENLABEL), label,
-                             BLOCK(gen_op_simple(POP),
-                                   // try exp catch if . == $label
-                                   //               then empty
-                                   //               else error end
-                                   //
-                                   // Can't use gen_binop(), as that's firmly
-                                   // stuck in parser.y as it refers to things
-                                   // like EQ.
-                                   gen_try(exp,
-                                           gen_cond(cond,
-                                                    gen_op_simple(BACKTRACK),
-                                                    gen_call("error", gen_noop())))));
+  return block_bind(
+      gen_op_var_fresh(STORE_PC, label),
+      exp, 
+      OP_HAS_VARIABLE | OP_BIND_WILDCARD);
 }
 
 block gen_cbinding(const struct cfunction* cfunctions, int ncfunctions, block code) {
   for (int cfunc=0; cfunc<ncfunctions; cfunc++) {
     inst* i = inst_new(CLOSURE_CREATE_C);
     i->imm.cfunc = &cfunctions[cfunc];
-    i->symbol = strdup(i->imm.cfunc->name);
-    code = block_bind(inst_block(i), code, OP_IS_CALL_PSEUDO);
+    i->symbol = strdup(cfunctions[cfunc].name);
+    i->nformals = cfunctions[cfunc].nargs - 1;
+    i->any_unbound = 0;
+    code = BLOCK(inst_block(i), code);
   }
   return code;
 }
@@ -1107,7 +1397,12 @@ static int count_cfunctions(block b) {
 }
 
 #ifndef WIN32
-extern char **environ;
+#  ifdef __APPLE__
+#    include <crt_externs.h>
+#    define environ (*_NSGetEnviron())
+#  else
+     extern char ** environ;
+#  endif
 #endif
 
 static jv
@@ -1144,10 +1439,10 @@ static int expand_call_arglist(block* b, jv args, jv *env) {
       } else if (!curr->bound_by) {
         if (curr->symbol[0] == '*' && curr->symbol[1] >= '1' && curr->symbol[1] <= '3' && curr->symbol[2] == '\0')
           locfile_locate(curr->locfile, curr->source, "jq: error: break used outside labeled control structure");
-        else if (curr->op == LOADV)
+        else if (curr->op == LOADV || curr->op == BACKTRACK_PC)
           locfile_locate(curr->locfile, curr->source, "jq: error: $%s is not defined", curr->symbol);
         else
-          locfile_locate(curr->locfile, curr->source, "jq: error: %s/%d is not defined", curr->symbol, block_count_actuals(curr->arglist));
+          locfile_locate(curr->locfile, curr->source, "jq: error: %s/%d is not defined", curr->symbol, curr->nactuals);
         errors++;
         // don't process this instruction if it's not well-defined
         ret = BLOCK(ret, inst_block(curr));
@@ -1226,10 +1521,14 @@ static int compile(struct bytecode* bc, block b, struct locfile* lf, jv args, jv
   int var_frame_idx = 0;
   bc->nsubfunctions = 0;
   errors += expand_call_arglist(&b, args, env);
-  b = BLOCK(b, gen_op_simple(RET));
+  int has_top = 0;
+
   jv localnames = jv_array();
   for (inst* curr = b.first; curr; curr = curr->next) {
     if (!curr->next) assert(curr == b.last);
+
+    has_top = has_top || (curr->op == TOP);
+
     int length = opcode_describe(curr->op)->length;
     if (curr->op == CALL_JQ) {
       for (inst* arg = curr->arglist.first; arg; arg = arg->next) {
@@ -1261,6 +1560,14 @@ static int compile(struct bytecode* bc, block b, struct locfile* lf, jv args, jv
       curr->imm.intval = idx;
     }
   }
+
+  // block should better have a RET_JQ unless it is the top block
+  if (!b.last || !has_top) {
+    b = BLOCK(b, gen_op_simple(RET_JQ));
+    b.last->bytecode_pos = ++pos;
+    b.last->compiled = bc;
+  }
+
   if (pos > 0xFFFF) {
     // too long for program counter to fit in uint16_t
     locfile_locate(lf, UNKNOWN_LOCATION,

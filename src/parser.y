@@ -58,6 +58,7 @@ struct lexer_param;
 %token DEFINEDOR "//"
 %token AS "as"
 %token DEF "def"
+%token CODEF "codef"
 %token MODULE "module"
 %token IMPORT "import"
 %token INCLUDE "include"
@@ -75,6 +76,7 @@ struct lexer_param;
 %token LABEL "label"
 %token BREAK "break"
 %token LOC "__loc__"
+%token HIGHPRECPIPE ">|"
 %token SETPIPE "|="
 %token SETPLUS "+="
 %token SETMINUS "-="
@@ -84,6 +86,7 @@ struct lexer_param;
 %token LESSEQ "<="
 %token GREATEREQ ">="
 %token ALTERNATION "?//"
+%token COEXPR "@@"
 
 %token QQSTRING_START
 %token <literal> QQSTRING_TEXT
@@ -110,6 +113,7 @@ struct lexer_param;
 %precedence '?'
 %precedence "try"
 %precedence "catch"
+%right HIGHPRECPIPE
 
 
 %type <blk> Exp Term
@@ -119,7 +123,7 @@ struct lexer_param;
 %type <blk> FuncDef FuncDefs
 %type <blk> Module Import Imports ImportWhat ImportFrom
 %type <blk> Param Params Arg Args
-%type <blk> Patterns RepPatterns Pattern ArrayPats ObjPats ObjPat
+%type <blk> Patterns Pattern ArrayPats ObjPats ObjPat
 %type <literal> Keyword
 %{
 #include "lexer.h"
@@ -172,7 +176,7 @@ static jv check_object_key(block k) {
     char errbuf[15];
     return jv_string_fmt("Cannot use %s (%s) as object key",
         jv_kind_name(block_const_kind(k)),
-        jv_dump_string_trunc(jv_copy(block_const(k)), errbuf, sizeof(errbuf)));
+        jv_dump_string_trunc(block_const(k), errbuf, sizeof(errbuf)));
   }
   return jv_invalid();
 }
@@ -216,19 +220,25 @@ static block constant_fold(block a, block b, int op) {
   jv res = jv_invalid();
 
   if (block_const_kind(a) == JV_KIND_NUMBER) {
-    double na = jv_number_value(block_const(a));
-    double nb = jv_number_value(block_const(b));
+    jv jv_a = block_const(a);
+    jv jv_b = block_const(b);
+
+    double na = jv_number_value(jv_a);
+    double nb = jv_number_value(jv_b);
+
+    int cmp = jv_cmp(jv_a, jv_b);
+
     switch (op) {
     case '+': res = jv_number(na + nb); break;
     case '-': res = jv_number(na - nb); break;
     case '*': res = jv_number(na * nb); break;
     case '/': res = jv_number(na / nb); break;
-    case EQ:  res = (na == nb ? jv_true() : jv_false()); break;
-    case NEQ: res = (na != nb ? jv_true() : jv_false()); break;
-    case '<': res = (na < nb ? jv_true() : jv_false()); break;
-    case '>': res = (na > nb ? jv_true() : jv_false()); break;
-    case LESSEQ: res = (na <= nb ? jv_true() : jv_false()); break;
-    case GREATEREQ: res = (na >= nb ? jv_true() : jv_false()); break;
+    case EQ:  res = (cmp == 0 ? jv_true() : jv_false()); break;
+    case NEQ: res = (cmp != 0 ? jv_true() : jv_false()); break;
+    case '<': res = (cmp < 0 ? jv_true() : jv_false()); break;
+    case '>': res = (cmp > 0 ? jv_true() : jv_false()); break;
+    case LESSEQ: res = (cmp <= 0 ? jv_true() : jv_false()); break;
+    case GREATEREQ: res = (cmp >= 0 ? jv_true() : jv_false()); break;
     default: break;
     }
   } else if (op == '+' && block_const_kind(a) == JV_KIND_STRING) {
@@ -297,8 +307,24 @@ static block gen_update(block object, block val, int optype) {
 
 %%
 TopLevel:
-Module Imports Exp {
-  *answer = BLOCK($1, $2, gen_op_simple(TOP), $3);
+Module Imports Exp {  
+
+  // it looks pretty when the boilerplate code calls to @main
+  // but it's counter-productive: the call introduces an unneded frame
+
+  // block main = gen_function("@main", gen_noop(), $3);
+  // block call_main = block_bind_referenced(
+  //   main,
+  //   gen_location(@$, locations, gen_call("@main", gen_noop())),
+  //   OP_IS_CALL_PSEUDO);
+
+  block main_loop = BLOCK (
+    gen_op_simple(START),
+    $3, // call_main
+    gen_op_simple(TAIL_OUT)
+  );
+
+  *answer = BLOCK($1, $2, gen_marker(TOP), main_loop);
 } |
 Module Imports FuncDefs {
   *answer = BLOCK($1, $2, $3);
@@ -331,12 +357,39 @@ FuncDefs:
   $$ = gen_noop();
 } |
 FuncDef FuncDefs {
-  $$ = block_bind($1, $2, OP_IS_CALL_PSEUDO);
+  $$ = block_join($1, $2);
 }
 
 Exp:
 FuncDef Exp %prec FUNCDEF {
   $$ = block_bind_referenced($1, $2, OP_IS_CALL_PSEUDO);
+} |
+
+"codef" '(' '$' ')' IDENT ':' Exp ';' %prec FUNCDEF Exp {
+  /* coexp(body) */
+  block coexp = gen_call("coexp", gen_lambda($7));
+  /* as $IDENT | */
+  block covar = gen_op_var_fresh(STOREV, jv_string_value($5));
+  /* def IDENT: $IDENT | fhread; */
+  block codef = gen_function(
+    jv_string_value($5), 
+    gen_noop(), 
+    BLOCK(
+      gen_op_unbound(LOADV, jv_string_value($5)), 
+      gen_call("fhread", gen_noop())
+    )
+  );
+
+  /* Now bind $9 so it sees the codef */
+  block b = block_bind_referenced(codef, $9, OP_IS_CALL_PSEUDO | OP_HAS_BINDING);
+  
+  /* Now bind that so it sees the variable $IDENT */
+  b = block_bind_referenced(covar, b, OP_HAS_VARIABLE);
+
+  /* Now do the rest of the binding for a $IDENT | Exp */
+  covar = block_take_block(&b);
+  $$ = BLOCK(gen_const(jv_null()), gen_destructure(coexp, covar, b));
+  jv_free($5);
 } |
 
 Term "as" Patterns '|' Exp {
@@ -357,18 +410,25 @@ Term "as" Patterns '|' Exp {
 "if" Exp "then" Exp ElseBody {
   $$ = gen_cond($2, $4, $5);
 } |
+"if" Exp "then" Exp "end" {
+  $$ = gen_cond($2, $4, gen_noop());
+} |
 "if" Exp "then" error {
   FAIL(@$, "Possibly unterminated 'if' statement");
   $$ = $2;
 } |
 
+"try" '(' Exp ';' Exp ')' {
+  $$ = gen_try($3, $5);
+} |
+"try" '(' Exp ';' Exp ';' Exp ')' {
+  $$ = BLOCK(gen_call("_try_finally", BLOCK(gen_lambda($3), gen_lambda($5), gen_lambda($7))));
+} |
 "try" Exp "catch" Exp {
-  //$$ = BLOCK(gen_op_target(FORK_OPT, $2), $2, $4);
-  $$ = gen_try($2, gen_try_handler($4));
+  $$ = gen_try($2, $4);
 } |
 "try" Exp {
-  //$$ = BLOCK(gen_op_target(FORK_OPT, $2), $2, gen_op_simple(BACKTRACK));
-  $$ = gen_try($2, gen_op_simple(BACKTRACK));
+  $$ = gen_try($2, gen_op_simple(BACKTRACK_0));
 } |
 "try" Exp "catch" error {
   FAIL(@$, "Possibly unterminated 'try' statement");
@@ -383,7 +443,7 @@ Term "as" Patterns '|' Exp {
 } |
 
 Exp '?' {
-  $$ = gen_try($1, gen_op_simple(BACKTRACK));
+  $$ = gen_try($1, gen_op_simple(BACKTRACK_0));
 } |
 
 Exp '=' Exp {
@@ -411,6 +471,10 @@ Exp "|=" Exp {
 } |
 
 Exp '|' Exp {
+  $$ = block_join($1, $3);
+} |
+
+Exp ">|" Exp {
   $$ = block_join($1, $3);
 } |
 
@@ -573,7 +637,14 @@ Param:
   $$ = gen_param_regular(jv_string_value($2));
   jv_free($2);
 } |
-
+'$' Keyword {
+  $$ = gen_param_regular(jv_string_value($2));
+  jv_free($2);
+} |
+"@@" IDENT {
+  $$ = gen_param_coexpr(jv_string_value($2));
+  jv_free($2);
+} |
 IDENT {
   $$ = gen_param(jv_string_value($1));
   jv_free($1);
@@ -633,14 +704,16 @@ REC {
 BREAK '$' IDENT {
   jv v = jv_string_fmt("*label-%s", jv_string_value($3));     // impossible symbol
   $$ = gen_location(@$, locations,
-                    BLOCK(gen_op_unbound(LOADV, jv_string_value(v)),
-                    gen_call("error", gen_noop())));
+                    gen_op_unbound(BACKTRACK_PC, jv_string_value(v)));
   jv_free(v);
   jv_free($3);
 } |
 BREAK error {
   FAIL(@$, "break requires a label to break to");
   $$ = gen_noop();
+} |
+BREAK LITERAL {
+  $$ = gen_op_const(BACKTRACK_N, $2);
 } |
 Term FIELD '?' {
   $$ = gen_index_opt($1, gen_const($2));
@@ -681,6 +754,12 @@ Term '[' Exp ']' '?' {
 } |
 Term '[' Exp ']' %prec NONOPT {
   $$ = gen_index($1, $3);
+} |
+Term '.' '[' Exp ']' '?' {
+  $$ = gen_index_opt($1, $4);
+} |
+Term '.' '[' Exp ']' %prec NONOPT {
+  $$ = gen_index($1, $4);
 } |
 Term '[' ']' '?' {
   $$ = block_join($1, gen_op_simple(EACH_OPT));
@@ -731,12 +810,17 @@ FORMAT {
   else
     $$ = BLOCK(gen_subexp(gen_const(jv_object())), $2, gen_op_simple(POP));
 } |
-'$' LOC {
-  $$ = gen_const(JV_OBJECT(jv_string("file"), jv_copy(locations->fname),
-                           jv_string("line"), jv_number(locfile_get_line(locations, @$.start) + 1)));
-} |
 '$' IDENT {
   $$ = gen_location(@$, locations, gen_op_unbound(LOADV, jv_string_value($2)));
+  jv_free($2);
+} |
+'$' Keyword {
+  if (strcmp(jv_string_value($2), "__loc__") == 0) {
+    $$ = gen_const(JV_OBJECT(jv_string("file"), jv_copy(locations->fname),
+                             jv_string("line"), jv_number(locfile_get_line(locations, @$.start) + 1)));
+  } else {
+    $$ = gen_location(@$, locations, gen_op_unbound(LOADV, jv_string_value($2)));
+  }
   jv_free($2);
 } |
 IDENT {
@@ -774,20 +858,12 @@ Exp {
   $$ = gen_lambda($1);
 }
 
-RepPatterns:
-RepPatterns "?//" Pattern {
+Patterns:
+Patterns "?//" Pattern {
   $$ = BLOCK($1, gen_destructure_alt($3));
 } |
 Pattern {
   $$ = gen_destructure_alt($1);
-}
-
-Patterns:
-RepPatterns "?//" Pattern {
-  $$ = BLOCK($1, $3);
-} |
-Pattern {
-  $$ = $1;
 }
 
 Pattern:
@@ -853,6 +929,9 @@ Keyword:
 } |
 "def" {
   $$ = jv_string("def");
+} |
+"codef" {
+  $$ = jv_string("codef");
 } |
 "module" {
   $$ = jv_string("module");
@@ -928,11 +1007,23 @@ IDENT ':' ExpD {
   $$ = gen_dictpair($1, BLOCK(gen_op_simple(POP), gen_op_simple(DUP2),
                               gen_op_simple(DUP2), gen_op_simple(INDEX)));
   }
+| '$' IDENT ':' ExpD {
+  $$ = gen_dictpair(gen_location(@$, locations, gen_op_unbound(LOADV, jv_string_value($2))),
+                    $4);
+  }
 | '$' IDENT {
   $$ = gen_dictpair(gen_const($2),
                     gen_location(@$, locations, gen_op_unbound(LOADV, jv_string_value($2))));
   }
+| '$' Keyword {
+  $$ = gen_dictpair(gen_const($2),
+                    gen_location(@$, locations, gen_op_unbound(LOADV, jv_string_value($2))));
+  }
 | IDENT {
+  $$ = gen_dictpair(gen_const(jv_copy($1)),
+                    gen_index(gen_noop(), gen_const($1)));
+  }
+| Keyword {
   $$ = gen_dictpair(gen_const(jv_copy($1)),
                     gen_index(gen_noop(), gen_const($1)));
   }

@@ -1,7 +1,29 @@
+#include <assert.h>
 #include <string.h>
 #include <stdlib.h>
-#include <assert.h>
+
+#ifdef WIN32
+#include <windows.h>
+#include <ntstatus.h>
+#include <bcrypt.h>
+#else
+#include <unistd.h>
+#include <fcntl.h>
+#endif
+
+#include "jv.h"
 #include "jv_alloc.h"
+#include "jv_type_private.h"
+#include "jv_unicode.h"
+
+// making this static verbose function here
+// until we introduce a less confusing naming scheme
+// of jv_* API with regards to the memory management
+static double jv_number_get_value_and_consume(jv number) {
+  double value = jv_number_value(number);
+  jv_free(number);
+  return value;
+}
 
 static int parse_slice(jv j, jv slice, int* pstart, int* pend) {
   // Array slices
@@ -32,6 +54,8 @@ static int parse_slice(jv j, jv slice, int* pstart, int* pend) {
   } else {
     double dstart = jv_number_value(start_jv);
     double dend = jv_number_value(end_jv);
+    jv_free(start_jv);
+    jv_free(end_jv);
     if (dstart < 0) dstart += len;
     if (dend < 0) dend += len;
     if (dstart < 0) dstart = 0;
@@ -69,6 +93,7 @@ jv jv_get(jv t, jv k) {
         jv_free(v);
         v = jv_null();
       }
+      jv_free(k);
     } else {
       jv_free(t);
       jv_free(k);
@@ -135,6 +160,7 @@ jv jv_set(jv t, jv k, jv v) {
              (jv_get_kind(t) == JV_KIND_ARRAY || isnull)) {
     if (isnull) t = jv_array();
     t = jv_array_set(t, (int)jv_number_value(k), v);
+    jv_free(k);
   } else if (jv_get_kind(k) == JV_KIND_OBJECT &&
              (jv_get_kind(t) == JV_KIND_ARRAY || isnull)) {
     if (isnull) t = jv_array();
@@ -202,6 +228,7 @@ jv jv_has(jv t, jv k) {
              jv_get_kind(k) == JV_KIND_NUMBER) {
     jv elem = jv_array_get(t, (int)jv_number_value(k));
     ret = jv_bool(jv_is_valid(elem));
+    jv_free(k);
     jv_free(elem);
   } else {
     ret = jv_invalid_with_msg(jv_string_fmt("Cannot check whether %s has a %s key",
@@ -240,6 +267,7 @@ static jv jv_dels(jv t, jv keys) {
           ends = jv_array_append(ends, jv_number(end));
         } else {
           jv_free(new_array);
+          jv_free(key);
           new_array = jv_invalid_with_msg(jv_string_fmt("Start and end indices of an array slice must be numbers"));
           goto arr_out;
         }
@@ -258,7 +286,7 @@ static jv jv_dels(jv t, jv keys) {
     jv_array_foreach(t, i, elem) {
       int del = 0;
       while (neg_idx < jv_array_length(jv_copy(neg_keys))) {
-        int delidx = len + (int)jv_number_value(jv_array_get(jv_copy(neg_keys), neg_idx));
+        int delidx = len + (int)jv_number_get_value_and_consume(jv_array_get(jv_copy(neg_keys), neg_idx));
         if (i == delidx) {
           del = 1;
         }
@@ -268,7 +296,7 @@ static jv jv_dels(jv t, jv keys) {
         neg_idx++;
       }
       while (nonneg_idx < jv_array_length(jv_copy(nonneg_keys))) {
-        int delidx = (int)jv_number_value(jv_array_get(jv_copy(nonneg_keys), nonneg_idx));
+        int delidx = (int)jv_number_get_value_and_consume(jv_array_get(jv_copy(nonneg_keys), nonneg_idx));
         if (i == delidx) {
           del = 1;
         }
@@ -278,8 +306,8 @@ static jv jv_dels(jv t, jv keys) {
         nonneg_idx++;
       }
       for (int sidx=0; !del && sidx<jv_array_length(jv_copy(starts)); sidx++) {
-        if ((int)jv_number_value(jv_array_get(jv_copy(starts), sidx)) <= i &&
-            i < (int)jv_number_value(jv_array_get(jv_copy(ends), sidx))) {
+        if ((int)jv_number_get_value_and_consume(jv_array_get(jv_copy(starts), sidx)) <= i &&
+            i < (int)jv_number_get_value_and_consume(jv_array_get(jv_copy(ends), sidx))) {
           del = 1;
         }
       }
@@ -511,14 +539,13 @@ int jv_cmp(jv a, jv b) {
     break;
 
   case JV_KIND_NUMBER: {
-    double da = jv_number_value(a), db = jv_number_value(b);
-
-    // handle NaN as though it were null
-    if (da != da) r = jv_cmp(jv_null(), jv_number(db));
-    else if (db != db) r = jv_cmp(jv_number(da), jv_null());
-    else if (da < db) r = -1;
-    else if (da == db) r = 0;
-    else r = 1;
+    if (jvp_number_is_nan(a)) {
+      r = jv_cmp(jv_null(), jv_copy(b));
+    } else if (jvp_number_is_nan(b)) {
+      r = jv_cmp(jv_copy(a), jv_null());
+    } else {
+      r = jvp_number_cmp(a, b);
+    }
     break;
   }
 
@@ -640,4 +667,143 @@ jv jv_group(jv objects, jv keys) {
   }
   jv_mem_free(entries);
   return ret;
+}
+
+static int random_fill_buffer(unsigned char *buf, size_t sz) {
+#ifdef WIN32
+  if (BCryptGenRandom(NULL, buf, sz,
+                      BCRYPT_USE_SYSTEM_PREFERRED_RNG) == STATUS_SUCCESS)
+    return 1;
+#else
+  int fd = open("/dev/urandom", O_RDONLY);
+  ssize_t n = -1;
+
+  if (fd > -1) {
+    n = read(fd, buf, sz);
+    (void) close(fd);
+  }
+  if (n > -1 && sz == (size_t)n)
+    return 1;
+#endif
+  return 0;
+}
+
+jv jv_number_random_int(void) {
+  unsigned char buf[7];
+
+  if (!random_fill_buffer(buf, sizeof(buf)))
+    return jv_invalid_with_msg(jv_string("Could not generate random numbers"));
+  return jv_number(( (uint64_t)buf[0]                |
+                     (uint64_t)buf[1]         << 8   |
+                     (uint64_t)buf[2]         << 16  |
+                     (uint64_t)buf[3]         << 24  |
+                     (uint64_t)buf[4]         << 32  |
+                     (uint64_t)buf[5]         << 40  |
+                    ((uint64_t)buf[6] & 0x7)  << 48));
+}
+
+jv jv_number_random_bytes(size_t n) {
+  unsigned char buf[64];
+  jv ret = jv_array();
+
+  while (n > 0) {
+    size_t r = n > sizeof(buf) ? sizeof(buf) : n;
+    if (!random_fill_buffer(buf, r)) {
+      jv_free(ret);
+      return jv_invalid_with_msg(jv_string("Could not generate random numbers"));
+    }
+    n -= r;
+    for (size_t i = 0; i < r; i++)
+      ret = jv_array_append(ret, jv_number(buf[i]));
+  }
+  return ret;
+}
+
+jv jv_number_random_string(size_t n) {
+  jv ret = jv_string("");
+
+  n *= 2;
+  while (n > 0) {
+    unsigned char buf[64];
+    size_t r = n > sizeof(buf) ? sizeof(buf) : n;
+    if (!random_fill_buffer(buf, r)) {
+      jv_free(ret);
+      return jv_invalid_with_msg(jv_string("Could not generate random numbers"));
+    }
+    n -= r;
+    for (size_t i = 0; i < r; i+=2) {
+      char u8[8]; /* 4 is enough */
+      int len = jvp_utf8_encode(buf[i] << 8 | buf[i+1], u8);
+      ret = jv_string_concat(ret, jv_string_sized(u8, len));
+    }
+  }
+  return ret;
+}
+
+jv jv_parse_options(jv opts) {
+  if (jv_get_kind(opts) == JV_KIND_NULL ||
+      (jv_get_kind(opts) == JV_KIND_INVALID && !jv_invalid_has_msg(jv_copy(opts)))) {
+    jv_free(opts);
+    return jv_number(0);
+  }
+  if (jv_get_kind(opts) == JV_KIND_STRING)
+    opts = JV_ARRAY(opts);
+  if (jv_get_kind(opts) != JV_KIND_ARRAY) {
+    jv_free(opts);
+    return jv_invalid_with_msg(jv_string("invalid file input options"));
+  }
+  enum jv_parse_flags o = 0;
+  jv_array_foreach(opts, i, opt) {
+    if (jv_equal(jv_copy(opt), jv_string("seq")))
+      o |= JV_PARSE_SEQ;
+    else if (jv_equal(jv_copy(opt), jv_string("stream")))
+      o |= JV_PARSE_STREAMING;
+    else if (jv_equal(jv_copy(opt), jv_string("streamerrors")))
+      o |= JV_PARSE_STREAM_ERRORS;
+    else if (jv_equal(jv_copy(opt), jv_string("raw")))
+      o |= JV_PARSE_RAW;
+    jv_free(opt);
+  }
+  jv_free(opts);
+  return jv_number(o);
+}
+
+jv jv_dump_options(jv opts) {
+  if (jv_get_kind(opts) == JV_KIND_NULL)
+    return jv_number(0);
+  if (jv_get_kind(opts) == JV_KIND_STRING)
+    opts = JV_ARRAY(opts);
+  if (jv_get_kind(opts) != JV_KIND_ARRAY) {
+    jv_free(opts);
+    return jv_invalid_with_msg(jv_string("invalid file output options"));
+  }
+  enum jv_parse_flags o = 0;
+  jv_array_foreach(opts, i, opt) {
+    if (jv_equal(jv_copy(opt), jv_string("pretty")))
+      o |= JV_PRINT_PRETTY;
+    else if (jv_equal(jv_copy(opt), jv_string("ascii")))
+      o |= JV_PRINT_ASCII;
+    else if (jv_equal(jv_copy(opt), jv_string("color")))
+      o |= JV_PRINT_COLOR;
+    else if (jv_equal(jv_copy(opt), jv_string("colour")))
+      o |= JV_PRINT_COLOUR;
+    else if (jv_equal(jv_copy(opt), jv_string("sorted")))
+      o |= JV_PRINT_SORTED;
+    else if (jv_equal(jv_copy(opt), jv_string("tab")))
+      o |= JV_PRINT_TAB;
+    else if (jv_equal(jv_copy(opt), jv_string("isatty")))
+      o |= JV_PRINT_ISATTY;
+    else if (jv_equal(jv_copy(opt), jv_string("raw")))
+      o |= JV_PRINT_RAW;
+    else if (jv_equal(jv_copy(opt), jv_string("nolf")))
+      o |= JV_PRINT_NOLF;
+    else if (jv_get_kind(opt) == JV_KIND_NUMBER) {
+      /* Indent by N spaces */
+      int n = jv_number_value(opt);
+      o |= JV_PRINT_INDENT_FLAGS(n);
+    }
+    jv_free(opt);
+  }
+  jv_free(opts);
+  return jv_number(o);
 }
