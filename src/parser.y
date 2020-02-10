@@ -123,7 +123,7 @@ struct lexer_param;
 %type <blk> FuncDef FuncDefs
 %type <blk> Module Import Imports ImportWhat ImportFrom
 %type <blk> Param Params Arg Args
-%type <blk> Patterns RepPatterns Pattern ArrayPats ObjPats ObjPat
+%type <blk> Patterns Pattern ArrayPats ObjPats ObjPat
 %type <literal> Keyword
 %{
 #include "lexer.h"
@@ -858,20 +858,12 @@ Exp {
   $$ = gen_lambda($1);
 }
 
-RepPatterns:
-RepPatterns "?//" Pattern {
+Patterns:
+Patterns "?//" Pattern {
   $$ = BLOCK($1, gen_destructure_alt($3));
 } |
 Pattern {
   $$ = gen_destructure_alt($1);
-}
-
-Patterns:
-RepPatterns "?//" Pattern {
-  $$ = BLOCK($1, $3);
-} |
-Pattern {
-  $$ = $1;
 }
 
 Pattern:

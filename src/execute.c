@@ -880,35 +880,25 @@ jv jq_next(jq_state *jq) {
       break;
     }
 
-    case STOREVN:
-      stack_save(jq, BT_DESC_PROTECT,  pc - 1, stack_get_pos(jq));
-      /* fallthru */
     case STOREV: {
       uint16_t level = *pc++;  
       uint16_t v = *pc++;
+
       jv* var = frame_local_var(jq, v, level);
+      jv_free(*var);
+
       jv val = stack_pop(jq);
       if (jq->debug_flags & JQ_DEBUG_TRACE) {
         printf("V%d = ", v);
-        jv_dump(jv_copy(*var), 0);
+        jv_dump(jv_copy(val), 0);
         if (jq->debug_flags & JQ_DEBUG_REFCNT) {
-          printf("<%d>\n", jv_get_refcnt(*var));
+          printf("<%d>\n", jv_get_refcnt(val));
         } else {
           printf("\n");
         }
       }
-      jv_free(*var);
       *var = val;
       break;
-    }
-
-    case ON_BACKTRACK(STOREVN): {
-      uint16_t level = *pc++;
-      uint16_t v = *pc++;
-      jv* var = frame_local_var(jq, v, level);
-      jv_free(*var);
-      *var = jv_null();
-      goto do_backtrack;
     }
 
     case STORE_PC: {
@@ -971,16 +961,16 @@ jv jq_next(jq_state *jq) {
       uint16_t level = *pc++;
       uint16_t v = *pc++;
       jv* var = frame_local_var(jq, v, level);
+      jv_free(*var);
       if (jq->debug_flags & JQ_DEBUG_TRACE) {
         printf("V%d = ", v);
-        jv_dump(jv_copy(*var), 0);
+        jv_dump(jv_copy(val), 0);
         if (jq->debug_flags & JQ_DEBUG_REFCNT) {
-          printf("<%d>\n", jv_get_refcnt(*var));
+          printf("<%d>\n", jv_get_refcnt(val));
         } else {
           printf("\n");
         }
       }
-      jv_free(*var);
       *var = val;
       break;
     }
@@ -1267,26 +1257,62 @@ jv jq_next(jq_state *jq) {
       goto do_backtrack;
     }
 
-    case DESTRUCTURE_ALT:
-      stack_save(jq, BT_DESC_ERROR,  pc - 1, stack_get_pos(jq));
-      pc++; // skip offset this time
-      break;
-
     case FORK: {
       stack_save(jq, BT_DESC_NEXT_VALUE,  pc - 1, stack_get_pos(jq));
       pc++; // skip offset this time
       break;
     }
 
-    case ON_BACKTRACK(DESTRUCTURE_ALT): {
-      assert(jq->bt.desc == BT_DESC_ERROR && "Unexpected backtrack (DESTRUCTURE_ALT)");
-      // DESTRUCTURE_ALT doesn't want the error message on the stack,
-      // as we would just want to throw it away anyway.
+    case ON_BACKTRACK(DESTRUCTURE_BEGIN):
+      assert(jq->bt.desc == BT_DESC_ERROR && "Unexpected backtrack (DESTRUCTURE_BEGIN)");
+      // fallthrough
+    case DESTRUCTURE_BEGIN: {
+      // see gen_destructure() in compile.c
+
+      uint16_t *my_pc = pc-1;
+      uint16_t level = *pc++;
+      uint16_t var = *pc++;
+
+      // on a backtrack alt_ix will hold the index of the next matcher
+      jv* alt_ix_var = frame_local_var(jq, var, level);
+      int alt_ix = 0;
+
+      if (opcode == ON_BACKTRACK(DESTRUCTURE_BEGIN)) {
+        assert(jv_is_valid(*alt_ix_var));
+        alt_ix = jv_number_value(*alt_ix_var);
+      }      
+        
+      *alt_ix_var = jv_number(alt_ix + 1);
+      
+      // nullify all locals up until the alt_ix_var index
+      for (int v = 0; v < var; v++) {
+        jv* local = frame_local_var(jq, v, level);
+        jv_free(*local);
+        *local = jv_null();
+      }
+
+      // figure out if we are about to run the final matcher alternative
+      // this will be the case if our jump entry is immediately before the first matcher
+
+      const int len_of_jump = 2; // the length of the jump instruction
+      uint16_t first_matcher_offset = (*(pc+1)) + len_of_jump /*the first jump entry*/;
+      uint16_t jump_offset = (len_of_jump * alt_ix);
+      int is_final_matcher = (jump_offset + len_of_jump) == first_matcher_offset;
+
+      if (!is_final_matcher) {
+        stack_save(jq, BT_DESC_ERROR,  my_pc, stack_get_pos(jq));
+      }
+
+      // discard error, if any
       jq_reset_bt(jq, 0);
-      uint16_t offset = *pc++;
-      pc += offset;
+
+      // move to the next matcher via the jump table
+      // TODO: this can be optimized, but now it's fun to debug
+      pc += jump_offset;
+
       break;
     }
+
     case ON_BACKTRACK(FORK): {
       uint16_t offset = *pc++;
       pc += offset;

@@ -955,92 +955,146 @@ static block bind_matcher(block matcher, block body) {
   // cannot call block_bind(matcher, body) because that requires
   // block_has_only_binders(matcher), which is not true here as matchers
   // may also contain code to extract the correct elements
-  for (inst* i = matcher.first; i; i = i->next) {
-    if ((i->op == STOREV || i->op == STOREVN) && !i->bound_by)
-      block_bind_subblock(inst_block(i), body, OP_HAS_VARIABLE, 0);
+
+  block both = BLOCK(matcher, body);
+  for (inst* i = matcher.first; i && i->prev != matcher.last; i = i->next) {
+    if ((i->op == STOREV) && !i->bound_by)
+      block_bind_subblock(inst_block(i), both, OP_HAS_VARIABLE, 0);
   }
-  return BLOCK(matcher, body);
+  return both;
 }
 
-
-// Extract destructuring var names from the block
-// *vars should be a jv_object (for set semantics)
-static void block_get_unbound_vars(block b, jv *vars) {
-  assert(vars != NULL);
-  assert(jv_get_kind(*vars) == JV_KIND_OBJECT);
-  for (inst* i = b.first; i; i = i->next) {
-    if (i->subfn.first) {
-      block_get_unbound_vars(i->subfn, vars);
-      continue;
-    }
-    if ((i->op == STOREV || i->op == STOREVN) && i->bound_by == NULL) {
-      *vars = jv_object_set(*vars, jv_string(i->symbol), jv_true());
-    }
-  }
-}
-
-/* Build wrappers around destructuring matchers so that we can chain them
- * when we have errors.  The approach is as follows:
- * DESTRUCTURE_ALT NEXT_MATCHER (unless last matcher)
- * existing_matcher_block
- * JUMP BODY
+/*
+ * Generic ateration matcher processing
+ * 
+ * MULTIPLE PATTERNS (matchers)
+ * 
+ * Given the original code as 
+ * <var> as <matchers> | <body>
+ * 
+ * the layout of the resulting code will be:
+ * 
+ * <var> <call destructure_lambda>
+ * 
+ * where destructure_lambda will look like this:
+ * 
+ * DESTRUCTURE_BEGIN (ix_alt)
+ * JUMP matcher1 JUMP matcher2 ... JUMP matcherN 
+ * <matcher1> JUMP tail <matcher2> JUMP tail ... <matcher3>
+ * tail: STOREV *ix_alt
+ * <post>
+ * RET_JQ
+ * 
+ * The reasoning for this layout is that having a separate frame
+ * with destructure definitions allows for an efficient way to
+ * iterate over all local vars defined by the matchers
+ * The only thing is that we should somehow know the total number
+ * of the defined variables to nullify them.
+ * This is why <ix_alt> variable is defined last: it will receive
+ * a local var id immediately after the last var in the matchers
+ * providing us with the upper bound.
+ * 
+ * 
+ * SIGNLE PATTERN (matcher)
+ * 
+ * for the trivial case of a single matcher no function is defiend
+ * and no jumps installed.
+ * 
  */
-static block bind_alternation_matchers(block matchers, block body) {
-  block preamble = {0};
-  block altmatchers = {0};
-  block mb = {0};
-  block final_matcher = matchers;
+static block gen_alternation_matchers(block source, block matchers, block body) {
+  if (block_is_single(matchers)) {
+    // the TRIVIAL case of a single matcher
+    // avoid the complexities
 
-  // Pass through the matchers to find all destructured names.
-  while (final_matcher.first && final_matcher.first->op == DESTRUCTURE_ALT) {
-    block_append(&altmatchers, inst_block(block_take(&final_matcher)));
+    block matcher = matchers;
+
+    if(matchers.first->op == DESTRUCTURE_ALT) {
+      matcher = matchers.first->subfn;
+      matchers.first->subfn = gen_noop();
+      block_free(matchers);
+    }
+
+    return BLOCK(
+      gen_op_simple(DUP), 
+      source, 
+      bind_matcher(matcher, body)
+    );
+  }
+    
+    
+  // NONTRIVIAL case of multiple alternatie matchers
+
+  // this instruction will never execute
+  // it's used for two pruposes:
+  //  1. define a storage place for the next matcher index
+  //  2. record the next var index in this frame to scope all vars defined in matchers
+  // the second point above makes it possible to implement efficient nulling of the vars.
+  block alt_ix = gen_op_var_fresh(STOREV, "*alt_ix");
+
+  block jump_table_tail = gen_noop();
+  block actual_matchers = gen_noop();
+
+  for (inst* alt_m = matchers.first; alt_m; alt_m = alt_m->next) {
+    assert(alt_m->op == DESTRUCTURE_ALT);
+
+    // overtake the matcher from the 
+    // DESTRUCTURE_ALT instruction so that it can be freed
+    block matcher = alt_m->subfn;
+    alt_m->subfn = gen_noop();
+
+    // jump over the alt_ix STOREV
+    block_append(&matcher, gen_op_target(JUMP, alt_ix));
+    if (alt_m->next) {
+      // since it's not the last matcher we need to add to the jump table
+      // (this jump is actually pointing to the next matcher)
+      block_append(&jump_table_tail, gen_op_target(JUMP, matcher));
+    }
+    block_append(&actual_matchers, matcher);
   }
 
-  // We don't have any alternations here, so we can use the simplest case.
-  if (altmatchers.first == NULL) {
-    return bind_matcher(final_matcher, body);
-  }
+  block_free(matchers);
 
-  // Collect var names
-  jv all_vars = jv_object();
-  block_get_unbound_vars(altmatchers, &all_vars);
-  block_get_unbound_vars(final_matcher, &all_vars);
+  // pointing to the end of the table - i.e. the first matcher
+  block jump_table_head = gen_op_target(JUMP, jump_table_tail);
 
-  // We need a preamble of STOREVs to which to bind the matchers and the body.
-  jv_object_keys_foreach(all_vars, key) {
-    preamble = BLOCK(preamble,
-                     gen_op_simple(DUP),
-                     gen_const(jv_null()),
-                     gen_op_unbound(STOREV, jv_string_value(key)));
-    jv_free(key);
-  }
-  jv_free(all_vars);
+  // we need to pass the source as a closure to the function
+  // because otherwise we will have issues of dealing with two inputs:
+  // input 1: the original dot
+  // input 2: the source for the matchers (in case the source is outside of the func call)
 
-  // Now we build each matcher in turn
-  for (inst *i = altmatchers.first; i; i = i->next) {
-    block submatcher = i->subfn;
+  block destructure_flow = gen_function("@destructure_flow", gen_param("*source"), BLOCK(
+    gen_op_simple(DUP),
+    gen_call("*source", gen_noop()),
+    gen_op_bound(DESTRUCTURE_BEGIN, alt_ix),
+    jump_table_head,
+    jump_table_tail,
+    bind_matcher(
+      BLOCK(
+        actual_matchers,
+        alt_ix
+      ),
+      body
+    )
+  ));
 
-    // If we're successful, jump to the end of the matchers
-    submatcher = BLOCK(submatcher, gen_op_target(JUMP, final_matcher));
+  block source_closure = gen_function("@source", gen_noop(), source);
+  // this call is receivig the source as a parameter
+  block flow_call = gen_call(destructure_flow.first->symbol, source_closure);
+  flow_call.first->bound_by = destructure_flow.first;
+  flow_call.first->any_unbound = 0;
 
-    // DESTRUCTURE_ALT to the end of this submatcher so we can skip to the next one on error
-    mb = BLOCK(mb, gen_op_target(DESTRUCTURE_ALT, submatcher), submatcher);
-
-    // We're done with this inst and we don't want it anymore
-    // But we can't let it free the submatcher block.
-    i->subfn.first = i->subfn.last = NULL;
-  }
-  // We're done with these insts now.
-  block_free(altmatchers);
-
-  return bind_matcher(preamble, BLOCK(mb, final_matcher, body));
+  return BLOCK(
+    flow_call,
+    destructure_flow
+  );
 }
 
 block gen_reduce(block source, block matcher, block init, block body) {
   block res_var = gen_op_var_fresh(STOREV, "reduce");
-  block loop = BLOCK(gen_op_simple(DUPN),
-                     source,
-                     bind_alternation_matchers(matcher,
+  block loop = BLOCK(gen_op_simple(DUPN), gen_op_simple(POP),
+                     gen_alternation_matchers(
+                                  source,
+                                  matcher,
                                   BLOCK(gen_op_bound(LOADVN, res_var),
                                         body,
                                         gen_op_bound(STOREV, res_var))),
@@ -1056,33 +1110,34 @@ block gen_reduce(block source, block matcher, block init, block body) {
 block gen_foreach(block source, block matcher, block init, block update, block extract) {
   block output = gen_op_targetlater(JUMP);
   block state_var = gen_op_var_fresh(STOREV, "foreach");
-  block loop = BLOCK(gen_op_simple(DUPN),
-                     // get a value from the source expression:
-                     source,
+  block loop = BLOCK(gen_op_simple(DUPN), gen_op_simple(POP),
                      // destructure the value into variable(s) for all the code
                      // in the body to see
-                     bind_alternation_matchers(matcher,
-                                  // load the loop state variable
-                                  BLOCK(gen_op_bound(LOADVN, state_var),
-                                        // generate updated state
-                                        update,
-                                        // save the updated state for value extraction
-                                        gen_op_simple(DUP),
-                                        // save new state
-                                        gen_op_bound(STOREV, state_var),
-                                        // extract an output...
-                                        extract,
-                                        // ...and output it by jumping
-                                        // past the BACKTRACK that comes
-                                        // right after the loop body,
-                                        // which in turn is there
-                                        // because...
-                                        //
-                                        // (Incidentally, extract can also
-                                        // backtrack, e.g., if it calls
-                                        // empty, in which case we don't
-                                        // get here.)
-                                        output)));
+                     gen_alternation_matchers(
+                        // get a value from the source expression:
+                        source,
+                        matcher,
+                        // load the loop state variable
+                        BLOCK(gen_op_bound(LOADVN, state_var),
+                              // generate updated state
+                              update,
+                              // save the updated state for value extraction
+                              gen_op_simple(DUP),
+                              // save new state
+                              gen_op_bound(STOREV, state_var),
+                              // extract an output...
+                              extract,
+                              // ...and output it by jumping
+                              // past the BACKTRACK that comes
+                              // right after the loop body,
+                              // which in turn is there
+                              // because...
+                              //
+                              // (Incidentally, extract can also
+                              // backtrack, e.g., if it calls
+                              // empty, in which case we don't
+                              // get here.)
+                              output)));
   block foreach = BLOCK(gen_op_simple(DUP),
                         init,
                         state_var,
@@ -1194,11 +1249,6 @@ block gen_or(block a, block b) {
 }
 
 block gen_destructure_alt(block matcher) {
-  for (inst *i = matcher.first; i; i = i->next) {
-    if (i->op == STOREV) {
-      i->op = STOREVN;
-    }
-  }
   inst* i = inst_new(DESTRUCTURE_ALT);
   i->subfn = matcher;
   return inst_block(i);
@@ -1241,16 +1291,20 @@ block gen_object_matcher(block name, block curr) {
 block gen_destructure(block var, block matchers, block body) {
   // var bindings can be added after coding the program; leave the TOP first.
   block top = gen_noop();
-  if (body.first && body.first->op == TOP)
+  if (body.first && body.first->op == TOP) {
     top = inst_block(block_take(&body));
-
-  if (matchers.first && matchers.first->op == DESTRUCTURE_ALT) {
-    block_append(&var, gen_op_simple(DUP));
-  } else {
-    top = BLOCK(top, gen_op_simple(DUP));
   }
 
-  return BLOCK(top, gen_subexp(var), gen_op_simple(POP), bind_alternation_matchers(matchers, body));
+  return BLOCK(
+    top, 
+    gen_alternation_matchers(
+      BLOCK(
+        gen_subexp(var),                           
+        gen_op_simple(POP)  // needed because of the subexp
+      ),
+      matchers, 
+      body)
+  );
 }
 
 // Like gen_var_binding(), but bind `break`'s wildcard unbound variable
