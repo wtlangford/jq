@@ -564,6 +564,10 @@ int main(int argc, char* argv[]) {
         jq_flags |= JQ_DEBUG_TRACE_ALL;
         if (!short_opts) continue;
       }
+      if (isoption(argv[i],  0,  "debug-trace=detail", &short_opts)) {
+        jq_flags |= JQ_DEBUG_TRACE_DETAIL;
+        if (!short_opts) continue;
+      }
       if (isoption(argv[i],  0,  "debug-trace", &short_opts)) {
         jq_flags |= JQ_DEBUG_TRACE;
         continue;

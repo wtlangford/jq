@@ -184,7 +184,6 @@ static void jvp_dump_string(jv str, int ascii_only, FILE* F, jv* S, int T) {
 
 static void put_refcnt(struct dtoa_context* C, int refcnt, FILE *F, jv* S, int T){
   char buf[JVP_DTOA_FMT_MAX_LEN];
-  put_char(' ', F, S, T);
   put_char('<', F, S, T);
   put_str(jvp_dtoa_fmt(C, buf, refcnt), F, S, T);
   put_char('>', F, S, T);

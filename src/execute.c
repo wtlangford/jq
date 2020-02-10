@@ -172,7 +172,7 @@ struct jq_state {
   jv path;
   jv value_at_path;
   int subexp_nest;
-  int debug_trace_enabled;
+  int debug_flags;
   int initial_execution;
   unsigned next_label;
 
@@ -607,13 +607,13 @@ jv jq_next(jq_state *jq) {
   jv_nomem_handler(jq->nomem_handler, jq->nomem_handler_data);
 
   if (jq->halted) {
-    if (jq->debug_trace_enabled)
+    if (jq->debug_flags & JQ_DEBUG_TRACE)
       printf("\t<halted>\n");
     return jv_invalid();
   }
 
   if (jq->finished) {
-    if (jq->debug_trace_enabled)
+    if (jq->debug_flags & JQ_DEBUG_TRACE)
       printf("\t<finished>\n");
     return jv_invalid();
   }
@@ -631,13 +631,13 @@ jv jq_next(jq_state *jq) {
   assert(jq->parent == 0 || jq->restore_limit >= jq->stk.limit);
   while (1) {
     if (jq->halted) {
-      if (jq->debug_trace_enabled)
+      if (jq->debug_flags & JQ_DEBUG_TRACE)
         printf("\t<halted>\n");
       return jv_invalid();
     }
     uint16_t opcode = *pc;
 
-    if (jq->debug_trace_enabled) {
+    if (jq->debug_flags & JQ_DEBUG_TRACE) {
       dump_operation(frame_current(jq)->bc, pc);
       const struct opcode_description* opdesc = opcode_describe(opcode);
       stack_ptr param = 0;
@@ -646,25 +646,34 @@ jv jq_next(jq_state *jq) {
         if (stack_in == -1) stack_in = pc[1];
         param = jq->stk_top;
 
-        printf("\t(( ");
+
+        printf("\t");
+
+        if(stack_in) {
+          printf("(( ");
+        }
         for (int i=0; i<stack_in; i++) {
           if (i != 0) {
             printf(" | ");
             param = *stack_block_next(&jq->stk, param);
           }
           if (!param) break;
-          jv_dump(jv_copy(*(jv*)stack_block(&jq->stk, param)), JV_PRINT_REFCOUNT);
+          jv_dump(jv_copy(*(jv*)stack_block(&jq->stk, param)), (jq->debug_flags & JQ_DEBUG_REFCNT) ? JV_PRINT_REFCOUNT : 0);
           //printf("<%d>", jv_get_refcnt(param->val));
           //printf(" -- ");
           //jv_dump(jv_copy(jq->path), 0);
         }
-        printf(" )) ");
+        if(stack_in) {
+          printf(" )) ");
+        } else {
+          printf(" ");
+        }
 
-        if (jq->debug_trace_enabled & JQ_DEBUG_TRACE_DETAIL && param < jq->restore_limit) {
+        if (jq->debug_flags & JQ_DEBUG_TRACE_DETAIL && param < jq->restore_limit) {
           int first = 1;
           if(stack_in == 0) {
             // we haven't printed the top of the stack yet, print now
-            jv_dump(jv_copy(*(jv*)stack_block(&jq->stk, param)), JV_PRINT_REFCOUNT);
+            jv_dump(jv_copy(*(jv*)stack_block(&jq->stk, param)), (jq->debug_flags & JQ_DEBUG_REFCNT) ? JV_PRINT_REFCOUNT : 0);
           }
           while ((param = *stack_block_next(&jq->stk, param))) {
             if (!first || !stack_in) {
@@ -672,7 +681,7 @@ jv jq_next(jq_state *jq) {
             } else {
               first = 0;
             }
-            jv_dump(jv_copy(*(jv*)stack_block(&jq->stk, param)), JV_PRINT_REFCOUNT);
+            jv_dump(jv_copy(*(jv*)stack_block(&jq->stk, param)), (jq->debug_flags & JQ_DEBUG_REFCNT) ? JV_PRINT_REFCOUNT : 0);
           }
         }
       } else {
@@ -847,33 +856,27 @@ jv jq_next(jq_state *jq) {
     }
 
       // FIXME: loadv/storev may do too much copying/freeing
-    case LOADV: {
-      uint16_t level = *pc++;
-      uint16_t v = *pc++;
-      jv* var = frame_local_var(jq, v, level);
-      if (jq->debug_trace_enabled) {
-        printf("V%d = ", v);
-        jv_dump(jv_copy(*var), 0);
-        printf(" <%d>\n", jv_get_refcnt(*var));
-      }
-      jv_free(stack_pop(jq));
-      stack_push(jq, jv_copy(*var));
-      break;
-    }
-
+    case LOADV:
       // Does a load but replaces the variable with null
     case LOADVN: {
       uint16_t level = *pc++;
       uint16_t v = *pc++;
       jv* var = frame_local_var(jq, v, level);
-      if (jq->debug_trace_enabled) {
+      if (jq->debug_flags & JQ_DEBUG_TRACE) {
         printf("V%d = ", v);
         jv_dump(jv_copy(*var), 0);
-        printf(" (%d)\n", jv_get_refcnt(*var));
+        if (jq->debug_flags & JQ_DEBUG_REFCNT) {
+          printf("<%d>\n", jv_get_refcnt(*var));
+        } else {
+          printf("\n");
+        }
       }
-      jv_free(stack_popn(jq));
-      stack_push(jq, *var);
-      *var = jv_null();
+      jv_free(stack_pop(jq));
+      stack_push(jq, jv_copy(*var));
+      if (opcode == LOADVN) {
+        jv_free(*var);
+        *var = jv_null();
+      }
       break;
     }
 
@@ -885,10 +888,14 @@ jv jq_next(jq_state *jq) {
       uint16_t v = *pc++;
       jv* var = frame_local_var(jq, v, level);
       jv val = stack_pop(jq);
-      if (jq->debug_trace_enabled) {
+      if (jq->debug_flags & JQ_DEBUG_TRACE) {
         printf("V%d = ", v);
-        jv_dump(jv_copy(val), 0);
-        printf(" <%d>\n", jv_get_refcnt(val));
+        jv_dump(jv_copy(*var), 0);
+        if (jq->debug_flags & JQ_DEBUG_REFCNT) {
+          printf("<%d>\n", jv_get_refcnt(*var));
+        } else {
+          printf("\n");
+        }
       }
       jv_free(*var);
       *var = val;
@@ -921,7 +928,7 @@ jv jq_next(jq_state *jq) {
       jv_free(*var);
       *var = jv_number(pc_offset);
 
-      if (jq->debug_trace_enabled) {
+      if (jq->debug_flags & JQ_DEBUG_TRACE) {
         printf("V(pc)%d = ", v);
         jv_dump(jv_copy(*var), 0);
         printf("\n");
@@ -944,7 +951,7 @@ jv jq_next(jq_state *jq) {
 
       int offset = (int)jv_number_value(jv_copy(*var));
 
-      if (jq->debug_trace_enabled) {
+      if (jq->debug_flags & JQ_DEBUG_TRACE) {
         printf("V(pc)%d = ", v);
         jv_dump(jv_copy(*var), 0);
         printf("\n");
@@ -964,10 +971,14 @@ jv jq_next(jq_state *jq) {
       uint16_t level = *pc++;
       uint16_t v = *pc++;
       jv* var = frame_local_var(jq, v, level);
-      if (jq->debug_trace_enabled) {
+      if (jq->debug_flags & JQ_DEBUG_TRACE) {
         printf("V%d = ", v);
-        jv_dump(jv_copy(val), 0);
-        printf(" (%d)\n", jv_get_refcnt(val));
+        jv_dump(jv_copy(*var), 0);
+        if (jq->debug_flags & JQ_DEBUG_REFCNT) {
+          printf("<%d>\n", jv_get_refcnt(*var));
+        } else {
+          printf("\n");
+        }
       }
       jv_free(*var);
       *var = val;
@@ -1452,7 +1463,7 @@ jv jq_next(jq_state *jq) {
 
       assert(*pc == START && "COCREATE must be followed by START");
       jq_state *child = coinit(jq, pc);
-      jq_start(child, input, jq->debug_trace_enabled ? JQ_DEBUG_TRACE_ALL : 0);
+      jq_start(child, input, jq->debug_flags);
 
       // jump over the cobody
       pc += body_len;
@@ -1608,7 +1619,7 @@ jv jq_next(jq_state *jq) {
       }
       /* Now let the child send errors to stderr again? */
       jq_set_error_cb(child, NULL, NULL);
-      jq_start(child, jv_copy(input), jq->debug_trace_enabled ? JQ_DEBUG_TRACE_ALL : 0);
+      jq_start(child, jv_copy(input), jq->debug_flags);
       copy_callbacks(jq, child);
       jv_free(program);
       jv_free(options);
@@ -1882,7 +1893,7 @@ void jq_start(jq_state *jq, jv input, int flags) {
   jq->start_input = input;
   stack_save(jq, BT_DESC_NEXT_VALUE,  jq->parent ? jq->start_pc : jq->bc->code, stack_get_pos(jq));
 
-  jq->debug_trace_enabled = flags & JQ_DEBUG_TRACE_ALL;
+  jq->debug_flags = flags;
   jq->initial_execution = 1;
   jq->halted = 0;
   jq->finished = 0;
